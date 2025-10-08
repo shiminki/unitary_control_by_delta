@@ -400,6 +400,8 @@ def main():
     max_N = 4
     max_delta = 1.5
 
+    print(f"Training with dataset size {train_size}, eval size {eval_size}, max_N {max_N}, max_delta {max_delta}")
+
     train_dataset = build_SU2_dataset(dataset_size=train_size, max_N=max_N, max_delta=max_delta)
     eval_dataset = build_SU2_dataset(dataset_size=eval_size, max_N=max_N, max_delta=max_delta)
 

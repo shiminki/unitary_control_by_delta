@@ -253,6 +253,7 @@ class UniversalModelTrainer:
         epochs: int = 100,
         save_path: str | Path | None = None,
         plot: bool = False,
+        save_epoch: int = None,
     ) -> None:
         """
         Train the model using the provided dataloaders.
@@ -276,19 +277,34 @@ class UniversalModelTrainer:
                 train_losses = []
                 train_fids = []
                 
-                for batch in train_dataloader:
+                # Use a tqdm progress bar for the training dataloader to show per-epoch ETA
+                train_bar = tqdm(train_dataloader, desc=f"Epoch {epoch} training", leave=False)
+                running_losses = []
+                running_fids = []
+                for batch in train_bar:
                     loss, fid = self.train_epoch(batch)
                     train_losses.append(loss)
                     train_fids.append(fid)
+                    running_losses.append(loss)
+                    running_fids.append(fid)
+
+                    # update train_bar postfix with running averages
+                    avg_loss = np.mean(running_losses)
+                    avg_fid = np.mean(running_fids)
+                    train_bar.set_postfix({"loss": f"{avg_loss:.4f}", "fid": f"{avg_fid:.4f}"})
                 
                 mean_train_loss = np.mean(train_losses)
                 mean_train_fid = np.mean(train_fids)
                 
-                # Evaluation phase
+                # Evaluation phase (show per-epoch ETA with tqdm)
                 eval_fids = []
-                for batch in eval_dataloader:
+                eval_bar = tqdm(eval_dataloader, desc=f"Epoch {epoch} eval", leave=False)
+                eval_running = []
+                for batch in eval_bar:
                     eval_fid = self.evaluate(batch)
                     eval_fids.append(eval_fid)
+                    eval_running.append(eval_fid)
+                    eval_bar.set_postfix({"eval_fid": f"{np.mean(eval_running):.4f}"})
                 
                 mean_eval_fid = np.mean(eval_fids)
                 
@@ -312,6 +328,11 @@ class UniversalModelTrainer:
                 
                 fidelity_history.append(mean_eval_fid)
                 loss_history.append(mean_train_loss)
+
+
+                if save_epoch is not None and epoch % save_epoch == 0 and save_path is not None:
+                    epoch_save_path = Path(save_path).parent / f"{Path(save_path).stem}_epoch{epoch}.pt"
+                    self._save_weight(epoch_save_path)
         
         # Reload best weights
         if self.best_state is not None:
