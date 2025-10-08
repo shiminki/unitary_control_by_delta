@@ -44,8 +44,7 @@ class UniversalModelTrainer:
             epsilon_std: Standard deviation for Gaussian noise epsilon
             device: Training device
         """
-        
-        print(f"Total parameters: {sum(p.numel() for p in model.parameters())}, device: {device}")
+        print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
         self.model = model.to(device)
         self.unitary_generator = unitary_generator
         self.fidelity_fn = fidelity_fn
@@ -83,6 +82,9 @@ class UniversalModelTrainer:
         batch_size, n, _ = data_batch.shape
         total_samples = batch_size * self.monte_carlo
         
+        # Move data_batch to device if not already
+        data_batch = data_batch.to(self.device)
+        
         # Repeat data_batch for monte carlo samples
         # Shape: (batch_size, monte_carlo, n, 6)
         data_expanded = data_batch.unsqueeze(1).repeat(1, self.monte_carlo, 1, 1)
@@ -94,35 +96,44 @@ class UniversalModelTrainer:
         
         # Sample deltas uniformly from the intervals
         # For each sample, pick one of the n intervals and sample uniformly
-        errors = torch.zeros(total_samples, 2, device=self.device)
-        targets = torch.zeros(total_samples, 2, 2, dtype=torch.complex128, device=self.device)
+        errors = torch.zeros(total_samples, 2, device=self.device, dtype=torch.float32)
+        targets = torch.zeros(total_samples, 2, 2, dtype=torch.cdouble, device=self.device)
+        
+        # Extract all rotation vectors at once to avoid repeated CPU-GPU transfers
+        rotation_vecs = data_batch[..., 2:].cpu().numpy()  # (batch_size, n, 4)
+        delta_ranges_cpu = delta_ranges.cpu().numpy()  # (batch_size, monte_carlo, n, 2)
+        
+        # Sample all at once
+        interval_indices = np.random.randint(0, n, size=(batch_size, self.monte_carlo))
+        uniform_samples = np.random.rand(batch_size, self.monte_carlo)
+        epsilon_samples = np.random.randn(batch_size, self.monte_carlo) * self.epsilon_std
+        
+        # Vectorized construction
+        errors_np = np.zeros((total_samples, 2), dtype=np.float32)
+        targets_list = []
         
         for b in range(batch_size):
             for m in range(self.monte_carlo):
                 idx = b * self.monte_carlo + m
+                j = interval_indices[b, m]
                 
-                # Randomly select one interval from n intervals
-                j = torch.randint(0, n, (1,)).item()
+                # Sample delta
+                delta_start = delta_ranges_cpu[b, m, j, 0]
+                delta_end = delta_ranges_cpu[b, m, j, 1]
+                delta = uniform_samples[b, m] * (delta_end - delta_start) + delta_start
+                epsilon = epsilon_samples[b, m]
                 
-                # Sample delta uniformly from [delta_j_start, delta_j_end]
-                delta_start = delta_ranges[b, m, j, 0].item()
-                delta_end = delta_ranges[b, m, j, 1].item()
-                delta = torch.rand(1).item() * (delta_end - delta_start) + delta_start
+                errors_np[idx, 0] = delta
+                errors_np[idx, 1] = epsilon
                 
-                # Sample epsilon from Gaussian
-                epsilon = torch.randn(1).item() * self.epsilon_std
-                
-                errors[idx, 0] = delta
-                errors[idx, 1] = epsilon
-                
-                # Get target unitary from j-th rotation vector
-                n_x = data_batch[b, j, 2].item()
-                n_y = data_batch[b, j, 3].item()
-                n_z = data_batch[b, j, 4].item()
-                theta = data_batch[b, j, 5].item()
-                
-                # Construct target unitary: exp(-i * theta/2 * (n_x*X + n_y*Y + n_z*Z))
-                targets[idx] = self._rotation_unitary(n_x, n_y, n_z, theta)
+                # Get target unitary
+                n_x, n_y, n_z, theta = rotation_vecs[b, j]
+                U = self._rotation_unitary(n_x, n_y, n_z, theta)
+                targets_list.append(U)
+        
+        # Move to GPU in batch
+        errors = torch.from_numpy(errors_np).to(self.device)
+        targets = torch.stack(targets_list).to(self.device)
         
         return errors, targets, data_repeated
     
@@ -132,7 +143,7 @@ class UniversalModelTrainer:
         Construct rotation unitary exp(-i * theta/2 * n·σ).
         
         Returns:
-            (2, 2) complex unitary matrix
+            (2, 2) complex unitary matrix on CPU (will be moved to GPU in batch)
         """
         c = math.cos(theta / 2)
         s = math.sin(theta / 2)
@@ -141,7 +152,7 @@ class UniversalModelTrainer:
         U = torch.tensor([
             [c - 1j * s * n_z, -1j * s * (n_x - 1j * n_y)],
             [-1j * s * (n_x + 1j * n_y), c + 1j * s * n_z]
-        ], dtype=torch.complex128)
+        ], dtype=torch.cdouble)
         
         return U
 
@@ -163,6 +174,7 @@ class UniversalModelTrainer:
         self.model.train()
         self.optimizer.zero_grad()
         
+        # Ensure data is on correct device
         data_batch = data_batch.to(self.device)
         batch_size = data_batch.shape[0]
         
@@ -170,11 +182,18 @@ class UniversalModelTrainer:
         # pulses: (batch_size, max_pulses, param_dim)
         pulses = self.model(data_batch)
         
+        # Ensure pulses are on GPU
+        assert pulses.device.type == self.device.split(':')[0], f"Pulses on {pulses.device}, expected {self.device}"
+        
         # Sample Monte Carlo errors and targets
         # errors: (batch_size * monte_carlo, 2)
         # targets: (batch_size * monte_carlo, 2, 2)
         # data_repeated: (batch_size * monte_carlo, n, 6)
         errors, targets, data_repeated = self.sample_monte_carlo_batch(data_batch)
+        
+        # Ensure errors and targets are on GPU
+        assert errors.device.type == self.device.split(':')[0], f"Errors on {errors.device}, expected {self.device}"
+        assert targets.device.type == self.device.split(':')[0], f"Targets on {targets.device}, expected {self.device}"
         
         # Repeat pulses for Monte Carlo samples
         # pulses_mc: (batch_size * monte_carlo, max_pulses, param_dim)
@@ -183,6 +202,9 @@ class UniversalModelTrainer:
         # Generate output unitaries
         # U_out: (batch_size * monte_carlo, 2, 2)
         U_out = self.unitary_generator(pulses_mc, errors)
+        
+        # Ensure U_out is on GPU
+        assert U_out.device.type == self.device.split(':')[0], f"U_out on {U_out.device}, expected {self.device}"
         
         # Compute loss
         loss = self.loss_fn(U_out, targets)
@@ -424,3 +446,56 @@ class UniversalModelTrainer:
         
         return np.mean(fidelities)
 
+
+# Example usage
+if __name__ == "__main__":
+    # Mock components for testing
+    class MockModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = nn.Linear(6, 10)
+            self.num_qubits = 1
+        
+        def forward(self, x):
+            # x: (B, n, 6) -> output: (B, max_pulses, param_dim)
+            B, n, _ = x.shape
+            return torch.randn(B, 4, 3)  # Example output
+    
+    def mock_unitary_generator(pulses, errors):
+        # pulses: (B, max_pulses, param_dim)
+        # errors: (B, 2)
+        B = pulses.shape[0]
+        return torch.eye(2, dtype=torch.cdouble).unsqueeze(0).repeat(B, 1, 1)
+    
+    def mock_fidelity_fn(U_out, U_target):
+        # Simple mock: return random fidelities
+        B = U_out.shape[0]
+        return torch.rand(B)
+    
+    # Create mock dataloaders
+    from su2_dataloader import build_SU2_dataset, SU2DataLoader
+    
+    dataset = build_SU2_dataset(dataset_size=1000, max_N=2)
+    train_loader = SU2DataLoader(dataset[:800], batch_size=32, shuffle=True)
+    eval_loader = SU2DataLoader(dataset[800:], batch_size=32, shuffle=False)
+    
+    # Create trainer
+    model = MockModel()
+    trainer = UniversalModelTrainer(
+        model=model,
+        unitary_generator=mock_unitary_generator,
+        fidelity_fn=mock_fidelity_fn,
+        monte_carlo=100,  # Smaller for testing
+        device="cpu"
+    )
+    
+    # Train
+    trainer.train(
+        train_dataloader=train_loader,
+        eval_dataloader=eval_loader,
+        epochs=2,
+        save_path="test_checkpoint.pt",
+        plot=True
+    )
+    
+    print("✓ Trainer test completed!")

@@ -370,43 +370,48 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--debug", type=bool, default=False, help="Enable debugging mode with smaller dataset")
     parser.add_argument("--save_epoch", type=int, default=None, help="Save model every N epochs (default: None)")
+    parser.add_argument("--monte_carlo", type=int, default=10000, help="Number of Monte Carlo samples")
     args = parser.parse_args()
 
-
     DEBUGGING = args.debug
-
 
     # Load model parameters from external JSON
     current_directory = os.path.dirname(__file__)
     model_params = load_model_params(f"{current_directory}/model_config.json")  
     model = UnitaryControlTransformer(**model_params)
 
+    # Determine device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+    
     if not DEBUGGING:
         train_size = 100000
         eval_size = 20000
-        device="cuda" if torch.cuda.is_available() else "cpu"
+        monte_carlo = args.monte_carlo
     else:
         train_size = 200
         eval_size = 40
-        device="cpu"
+        monte_carlo = 100  # Smaller for debugging
+        device = "cpu"  # Force CPU in debug mode
 
-
+    # Fixed: use string "device" as key
     trainer_params = {
         "model": model,
         "unitary_generator": batched_unitary_generator,
         "fidelity_fn": fidelity,
         "loss_fn": sharp_loss,
-        device: device,
+        "device": device, 
+        "monte_carlo": monte_carlo,
+        "epsilon_std": 0.05,
     }
 
     trainer = UniversalModelTrainer(**trainer_params)
-
-    
 
     max_N = 4
     max_delta = 1.5
 
     print(f"Training with dataset size {train_size}, eval size {eval_size}, max_N {max_N}, max_delta {max_delta}")
+    print(f"Monte Carlo samples: {monte_carlo}")
 
     train_dataset = build_SU2_dataset(dataset_size=train_size, max_N=max_N, max_delta=max_delta)
     eval_dataset = build_SU2_dataset(dataset_size=eval_size, max_N=max_N, max_delta=max_delta)
@@ -416,6 +421,10 @@ def main():
     train_dataloader = SU2DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     eval_dataloader = SU2DataLoader(eval_dataset, batch_size=batch_size, shuffle=True)
 
+    # Print GPU info if available
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
     trainer.train(
         train_dataloader=train_dataloader,
@@ -425,7 +434,6 @@ def main():
         plot=True,
         save_epoch=args.save_epoch,
     )
-
 
 
 if __name__ == "__main__":
