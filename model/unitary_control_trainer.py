@@ -27,7 +27,8 @@ class UniversalModelTrainer:
         loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         optimizer: Optional[torch.optim.Optimizer] = None,
         monte_carlo: int = 10000,
-        epsilon_std: float = 0.05
+        epsilon_std: float = 0.05,
+        device: str = "cuda",
     ) -> None:
         """
         Args:
@@ -43,7 +44,7 @@ class UniversalModelTrainer:
             epsilon_std: Standard deviation for Gaussian noise epsilon
             device: Training device
         """
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
         print(f"Total parameters: {sum(p.numel() for p in model.parameters())}, device: {device}")
         self.model = model.to(device)
         self.unitary_generator = unitary_generator
@@ -423,56 +424,3 @@ class UniversalModelTrainer:
         
         return np.mean(fidelities)
 
-
-# Example usage
-if __name__ == "__main__":
-    # Mock components for testing
-    class MockModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.linear = nn.Linear(6, 10)
-            self.num_qubits = 1
-        
-        def forward(self, x):
-            # x: (B, n, 6) -> output: (B, max_pulses, param_dim)
-            B, n, _ = x.shape
-            return torch.randn(B, 4, 3)  # Example output
-    
-    def mock_unitary_generator(pulses, errors):
-        # pulses: (B, max_pulses, param_dim)
-        # errors: (B, 2)
-        B = pulses.shape[0]
-        return torch.eye(2, dtype=torch.complex128).unsqueeze(0).repeat(B, 1, 1)
-    
-    def mock_fidelity_fn(U_out, U_target):
-        # Simple mock: return random fidelities
-        B = U_out.shape[0]
-        return torch.rand(B)
-    
-    # Create mock dataloaders
-    from su2_dataloader import build_SU2_dataset, SU2DataLoader
-    
-    dataset = build_SU2_dataset(dataset_size=1000, max_N=2)
-    train_loader = SU2DataLoader(dataset[:800], batch_size=32, shuffle=True)
-    eval_loader = SU2DataLoader(dataset[800:], batch_size=32, shuffle=False)
-    
-    # Create trainer
-    model = MockModel()
-    trainer = UniversalModelTrainer(
-        model=model,
-        unitary_generator=mock_unitary_generator,
-        fidelity_fn=mock_fidelity_fn,
-        monte_carlo=100,  # Smaller for testing
-        device="cpu"
-    )
-    
-    # Train
-    trainer.train(
-        train_dataloader=train_loader,
-        eval_dataloader=eval_loader,
-        epochs=2,
-        save_path="test_checkpoint.pt",
-        plot=True
-    )
-    
-    print("✓ Trainer test completed!")

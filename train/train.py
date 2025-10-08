@@ -381,22 +381,27 @@ def main():
     model_params = load_model_params(f"{current_directory}/model_config.json")  
     model = UnitaryControlTransformer(**model_params)
 
+    if not DEBUGGING:
+        train_size = 100000
+        eval_size = 20000
+        device="cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        train_size = 200
+        eval_size = 40
+        device="cpu"
+
 
     trainer_params = {
         "model": model,
         "unitary_generator": batched_unitary_generator,
         "fidelity_fn": fidelity,
         "loss_fn": sharp_loss,
+        device: device,
     }
 
     trainer = UniversalModelTrainer(**trainer_params)
 
-    if not DEBUGGING:
-        train_size = 100000
-        eval_size = 20000
-    else:
-        train_size = 200
-        eval_size = 40
+    
 
     max_N = 4
     max_delta = 1.5
