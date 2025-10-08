@@ -369,6 +369,7 @@ def main():
     parser.add_argument("--save_path", type=str, default="weights/single_qubit_control/weights", help="Path to save model weights")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--debug", type=bool, default=False, help="Enable debugging mode with smaller dataset")
+    parser.add_argument("--save_epoch", type=int, default=None, help="Save model every N epochs (default: None)")
     args = parser.parse_args()
 
 
@@ -394,8 +395,8 @@ def main():
         train_size = 100000
         eval_size = 20000
     else:
-        train_size = 2000
-        eval_size = 400
+        train_size = 200
+        eval_size = 40
 
     max_N = 4
     max_delta = 1.5
@@ -416,7 +417,8 @@ def main():
         eval_dataloader=eval_dataloader,
         epochs=args.num_epoch,
         save_path=args.save_path,
-        plot=True
+        plot=True,
+        save_epoch=args.save_epoch,
     )
 
 

@@ -11,11 +11,6 @@ from tqdm import tqdm
 import numpy as np
 
 import matplotlib.pyplot as plt
-import sys
-
-# Add the project root to the system path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
-
 
 from model.unitary_control_transformer import UnitaryControlTransformer
 
@@ -31,9 +26,8 @@ class UniversalModelTrainer:
         fidelity_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         optimizer: Optional[torch.optim.Optimizer] = None,
-        monte_carlo: int = 1000,
-        epsilon_std: float = 0.05,
-        device: str = None,
+        monte_carlo: int = 10000,
+        epsilon_std: float = 0.05
     ) -> None:
         """
         Args:
@@ -49,18 +43,15 @@ class UniversalModelTrainer:
             epsilon_std: Standard deviation for Gaussian noise epsilon
             device: Training device
         """
-        print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Total parameters: {sum(p.numel() for p in model.parameters())}, device: {device}")
         self.model = model.to(device)
         self.unitary_generator = unitary_generator
         self.fidelity_fn = fidelity_fn
         self.loss_fn = loss_fn or (lambda U_out, U_target: 1.0 - self.fidelity_fn(U_out, U_target).mean())
         self.monte_carlo = monte_carlo
         self.epsilon_std = epsilon_std
-        if device is not None:
-            self.device = device
-        else:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {self.device}")
+        self.device = device
 
         self.optimizer = optimizer or torch.optim.Adam(self.model.parameters(), lr=3e-5)
 
@@ -149,7 +140,7 @@ class UniversalModelTrainer:
         U = torch.tensor([
             [c - 1j * s * n_z, -1j * s * (n_x - 1j * n_y)],
             [-1j * s * (n_x + 1j * n_y), c + 1j * s * n_z]
-        ], dtype=torch.cdouble)
+        ], dtype=torch.complex128)
         
         return U
 
@@ -254,6 +245,7 @@ class UniversalModelTrainer:
         save_path: str | Path | None = None,
         plot: bool = False,
         save_epoch: int = None,
+        log_interval: int = 1,
     ) -> None:
         """
         Train the model using the provided dataloaders.
@@ -264,75 +256,71 @@ class UniversalModelTrainer:
             epochs: Number of training epochs
             save_path: Path to save checkpoints
             plot: Whether to plot training curves
+            save_epoch: Save checkpoint every N epochs
+            log_interval: Log metrics every N epochs
         """
-        
         self.model.to(self.device)
         
         fidelity_history = []
         loss_history = []
         
-        with tqdm(total=epochs, desc="Training", dynamic_ncols=True) as pbar:
-            for epoch in range(1, epochs + 1):
-                # Training phase
-                train_losses = []
-                train_fids = []
-                
-                # Use a tqdm progress bar for the training dataloader to show per-epoch ETA
-                train_bar = tqdm(train_dataloader, desc=f"Epoch {epoch} training", leave=False)
-                running_losses = []
-                running_fids = []
-                for batch in train_bar:
-                    loss, fid = self.train_epoch(batch)
-                    train_losses.append(loss)
-                    train_fids.append(fid)
-                    running_losses.append(loss)
-                    running_fids.append(fid)
-
-                    # update train_bar postfix with running averages
-                    avg_loss = np.mean(running_losses)
-                    avg_fid = np.mean(running_fids)
-                    train_bar.set_postfix({"loss": f"{avg_loss:.4f}", "fid": f"{avg_fid:.4f}"})
-                
-                mean_train_loss = np.mean(train_losses)
-                mean_train_fid = np.mean(train_fids)
-                
-                # Evaluation phase (show per-epoch ETA with tqdm)
-                eval_fids = []
-                eval_bar = tqdm(eval_dataloader, desc=f"Epoch {epoch} eval", leave=False)
-                eval_running = []
-                for batch in eval_bar:
-                    eval_fid = self.evaluate(batch)
-                    eval_fids.append(eval_fid)
-                    eval_running.append(eval_fid)
-                    eval_bar.set_postfix({"eval_fid": f"{np.mean(eval_running):.4f}"})
-                
-                mean_eval_fid = np.mean(eval_fids)
-                
-                # Track best model
-                if mean_eval_fid > self.best_fidelity:
-                    self.best_fidelity = mean_eval_fid
-                    self.best_state = {
-                        k: v.detach().cpu().clone() 
-                        for k, v in self.model.state_dict().items()
-                    }
-                
-                # Update progress bar
-                pbar.set_postfix({
-                    "epoch": epoch,
-                    "train_loss": f"{mean_train_loss:.4f}",
-                    "train_fid": f"{mean_train_fid:.4f}",
-                    "eval_fid": f"{mean_eval_fid:.4f}",
-                    "best": f"{self.best_fidelity:.4f}",
-                })
-                pbar.update(1)
-                
-                fidelity_history.append(mean_eval_fid)
-                loss_history.append(mean_train_loss)
-
-
-                if save_epoch is not None and epoch % save_epoch == 0 and save_path is not None:
-                    epoch_save_path = Path(save_path).parent / f"{Path(save_path).stem}_epoch{epoch}.pt"
-                    self._save_weight(epoch_save_path)
+        # Print header
+        print("\n" + "=" * 90)
+        print(f"{'Epoch':>6} | {'Train Loss':>12} | {'Train Fid':>10} | {'Eval Fid':>10} | {'Best Fid':>10} | {'Time':>8}")
+        print("=" * 90)
+        
+        import time
+        for epoch in range(1, epochs + 1):
+            epoch_start_time = time.time()
+            
+            # Training phase
+            train_losses = []
+            train_fids = []
+            
+            # Use tqdm only for batch progress, but disable output unless verbose
+            for batch in tqdm(train_dataloader, desc=f"Epoch {epoch}/{epochs} [Train]", 
+                            leave=False, ncols=80, disable=False):
+                loss, fid = self.train_epoch(batch)
+                train_losses.append(loss)
+                train_fids.append(fid)
+            
+            mean_train_loss = np.mean(train_losses)
+            mean_train_fid = np.mean(train_fids)
+            
+            # Evaluation phase
+            eval_fids = []
+            for batch in tqdm(eval_dataloader, desc=f"Epoch {epoch}/{epochs} [Eval]", 
+                            leave=False, ncols=80, disable=False):
+                eval_fid = self.evaluate(batch)
+                eval_fids.append(eval_fid)
+            
+            mean_eval_fid = np.mean(eval_fids)
+            
+            # Track best model
+            if mean_eval_fid > self.best_fidelity:
+                self.best_fidelity = mean_eval_fid
+                self.best_state = {
+                    k: v.detach().cpu().clone() 
+                    for k, v in self.model.state_dict().items()
+                }
+            
+            epoch_time = time.time() - epoch_start_time
+            
+            # Log metrics at specified interval
+            if epoch % log_interval == 0 or epoch == 1 or epoch == epochs:
+                print(f"{epoch:6d} | {mean_train_loss:12.6f} | {mean_train_fid:10.6f} | "
+                      f"{mean_eval_fid:10.6f} | {self.best_fidelity:10.6f} | {epoch_time:7.1f}s")
+            
+            fidelity_history.append(mean_eval_fid)
+            loss_history.append(mean_train_loss)
+            
+            # Save checkpoint at specified interval
+            if save_epoch is not None and epoch % save_epoch == 0 and save_path is not None:
+                epoch_save_path = Path(save_path).parent / f"{Path(save_path).stem}_epoch{epoch}.pt"
+                self._save_weight_checkpoint(epoch_save_path)
+        
+        print("=" * 90)
+        print(f"Training completed! Best fidelity: {self.best_fidelity:.6f}\n")
         
         # Reload best weights
         if self.best_state is not None:
@@ -353,6 +341,21 @@ class UniversalModelTrainer:
     # ------------------------------------------------------------------
     # Persistence and plotting helpers
     # ------------------------------------------------------------------
+
+    def _save_weight_checkpoint(self, path: str | Path) -> None:
+        """Save a checkpoint (current state, not necessarily best)."""
+        self.model.eval()
+        
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save current state
+        current_state = {
+            k: v.detach().cpu().clone() 
+            for k, v in self.model.state_dict().items()
+        }
+        torch.save(current_state, str(path))
+        print(f"    Checkpoint saved → {path}")
 
     def _save_weight(self, path: str | Path) -> None:
         """Save the best model weights."""
@@ -420,3 +423,56 @@ class UniversalModelTrainer:
         
         return np.mean(fidelities)
 
+
+# Example usage
+if __name__ == "__main__":
+    # Mock components for testing
+    class MockModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = nn.Linear(6, 10)
+            self.num_qubits = 1
+        
+        def forward(self, x):
+            # x: (B, n, 6) -> output: (B, max_pulses, param_dim)
+            B, n, _ = x.shape
+            return torch.randn(B, 4, 3)  # Example output
+    
+    def mock_unitary_generator(pulses, errors):
+        # pulses: (B, max_pulses, param_dim)
+        # errors: (B, 2)
+        B = pulses.shape[0]
+        return torch.eye(2, dtype=torch.complex128).unsqueeze(0).repeat(B, 1, 1)
+    
+    def mock_fidelity_fn(U_out, U_target):
+        # Simple mock: return random fidelities
+        B = U_out.shape[0]
+        return torch.rand(B)
+    
+    # Create mock dataloaders
+    from su2_dataloader import build_SU2_dataset, SU2DataLoader
+    
+    dataset = build_SU2_dataset(dataset_size=1000, max_N=2)
+    train_loader = SU2DataLoader(dataset[:800], batch_size=32, shuffle=True)
+    eval_loader = SU2DataLoader(dataset[800:], batch_size=32, shuffle=False)
+    
+    # Create trainer
+    model = MockModel()
+    trainer = UniversalModelTrainer(
+        model=model,
+        unitary_generator=mock_unitary_generator,
+        fidelity_fn=mock_fidelity_fn,
+        monte_carlo=100,  # Smaller for testing
+        device="cpu"
+    )
+    
+    # Train
+    trainer.train(
+        train_dataloader=train_loader,
+        eval_dataloader=eval_loader,
+        epochs=2,
+        save_path="test_checkpoint.pt",
+        plot=True
+    )
+    
+    print("✓ Trainer test completed!")
