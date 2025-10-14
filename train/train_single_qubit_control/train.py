@@ -19,12 +19,10 @@ F = 1/N sum_{j=1}^N int_{delta_j^start}^{delta_j^end} F(U_j, U_out(delta; phi(t)
 
 from __future__ import annotations
 
-import math
-from typing import Callable, Dict, List, Iterator
+from typing import Dict
 
 import torch
 
-from collections import defaultdict
 
 import json
 import argparse

@@ -190,8 +190,13 @@ class UniversalModelTrainer:
         # U_out: (batch_size * monte_carlo, d, d)
         U_out = self.unitary_generator(pulses_mc, errors)
         
-        # Compute loss
-        loss = self.loss_fn(U_out, targets, fidelity_fn=self.fidelity_fn)
+        # Compute loss - FIXED: Pass fidelity_fn as kwarg
+        if hasattr(self.loss_fn, '__self__'):
+            # If loss_fn is a bound method, call it directly
+            loss = self.loss_fn(U_out, targets)
+        else:
+            # If loss_fn is a function that needs fidelity_fn
+            loss = self.loss_fn(U_out, targets, fidelity_fn=self.fidelity_fn)
         
         # Compute mean fidelity for monitoring
         with torch.no_grad():
@@ -203,6 +208,8 @@ class UniversalModelTrainer:
         self.optimizer.step()
         
         return float(loss.item()), mean_fid
+
+
 
     # ------------------------------------------------------------------
     # Evaluation
