@@ -2,6 +2,7 @@ import torch
 import numpy as np
 
 import sys
+import os
 
 # Add the project root to the system path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
@@ -10,7 +11,13 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from model.UnitaryControlTransformer import UnitaryControlTransformer
 from model.UniversalModelTrainer import UniversalModelTrainer
 
-from train.train import *
+from train import *
+
+from util.dataset.delta_control_SU2_dataset import build_SU2_dataset
+from util.dataset.SU2DataLoader import SU2DataLoader
+from util.fidelity.fidelity import fidelity_single_qubit_control
+
+
 
 def euler_yxy_from_rotation_vector(rotation_vector: torch.Tensor,
                                 eps: float = 1e-12) -> torch.Tensor:
@@ -299,3 +306,281 @@ model = UnitaryControlTransformer(
 X = torch.randn(10, 4, 6)
 
 model(X)
+
+
+
+
+
+#!/usr/bin/env python
+"""
+Debug script to identify CUDA memory access issues in the training pipeline.
+Run this before the main training to validate the setup.
+"""
+
+import torch
+import sys
+import os
+import traceback
+
+# Add the project root to the system path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+
+def test_unitary_generator():
+    """Test the unitary generator with small batches."""
+    print("\n" + "="*60)
+    print("Testing Unitary Generator for Two Qubits")
+    print("="*60)
+    
+    from util.unitary_generator.unitary_generators import batched_unitary_generator_two_qubits_entangled
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+    
+    # Test with small batch
+    B, L = 2, 10  # batch size, sequence length
+    
+    # Create test data
+    pulses = torch.randn(B, L, 5, device=device)
+    errors = torch.randn(B, 4, device=device)
+    
+    print(f"Pulses shape: {pulses.shape}")
+    print(f"Errors shape: {errors.shape}")
+    
+    try:
+        # Test unitary generation
+        U_out = batched_unitary_generator_two_qubits_entangled(pulses, errors)
+        print(f"Output unitary shape: {U_out.shape}")
+        print(f"Output dtype: {U_out.dtype}")
+        print(f"Output device: {U_out.device}")
+        
+        # Verify unitary properties
+        U_dagger = U_out.conj().transpose(-2, -1)
+        I_check = torch.bmm(U_out, U_dagger)
+        identity_error = torch.norm(I_check - torch.eye(4, device=device), dim=(-2, -1)).max()
+        print(f"Max deviation from unitarity: {identity_error.item():.6e}")
+        
+        print("✓ Unitary generator test passed!")
+        return True
+        
+    except Exception as e:
+        print(f"✗ Unitary generator test failed!")
+        print(f"Error: {e}")
+        traceback.print_exc()
+        return False
+
+def test_model_forward():
+    """Test the model forward pass."""
+    print("\n" + "="*60)
+    print("Testing Model Forward Pass")
+    print("="*60)
+    
+    from model.UnitaryControlTransformer import UnitaryControlTransformer
+    import json
+    
+    # Load model config
+    config_path = "train/train_with_entanglement/model_config.json"
+    with open(config_path, "r") as f:
+        model_params = json.load(f)
+    
+    # Convert pulse_space values to tuples
+    if "pulse_space" in model_params:
+        for k, v in model_params["pulse_space"].items():
+            model_params["pulse_space"][k] = tuple(v)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = UnitaryControlTransformer(**model_params).to(device)
+    
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    # Create test input
+    batch_size = 2
+    n = 3  # number of rotation vectors
+    test_input = torch.randn(batch_size, n, 6, device=device)
+    
+    print(f"Input shape: {test_input.shape}")
+    
+    try:
+        with torch.no_grad():
+            output = model(test_input)
+        
+        print(f"Output shape: {output.shape}")
+        print(f"Output dtype: {output.dtype}")
+        print(f"Output device: {output.device}")
+        print(f"Output range: [{output.min().item():.3f}, {output.max().item():.3f}]")
+        
+        print("✓ Model forward pass test passed!")
+        return True
+        
+    except Exception as e:
+        print(f"✗ Model forward pass test failed!")
+        print(f"Error: {e}")
+        traceback.print_exc()
+        return False
+
+def test_loss_computation():
+    """Test loss computation with fidelity."""
+    print("\n" + "="*60)
+    print("Testing Loss Computation")
+    print("="*60)
+    
+    from util.fidelity.fidelity import fidelity_entangled_control
+    from util.loss_function.loss_function import sharp_loss
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Create test unitaries
+    B = 4
+    U_out = torch.eye(4, dtype=torch.cfloat, device=device).unsqueeze(0).expand(B, -1, -1)
+    U_target = torch.eye(2, dtype=torch.cfloat, device=device).unsqueeze(0).expand(B, -1, -1)
+    
+    print(f"U_out shape: {U_out.shape}")
+    print(f"U_target shape: {U_target.shape}")
+    
+    try:
+        # Test fidelity computation
+        fidelity = fidelity_entangled_control(U_out, U_target)
+        print(f"Fidelity shape: {fidelity.shape}")
+        print(f"Fidelity values: {fidelity}")
+        
+        # Test loss computation
+        loss = sharp_loss(U_out, U_target, fidelity_fn=fidelity_entangled_control)
+        print(f"Loss: {loss.item():.6f}")
+        
+        print("✓ Loss computation test passed!")
+        return True
+        
+    except Exception as e:
+        print(f"✗ Loss computation test failed!")
+        print(f"Error: {e}")
+        traceback.print_exc()
+        return False
+
+def test_training_step():
+    """Test a single training step."""
+    print("\n" + "="*60)
+    print("Testing Single Training Step")
+    print("="*60)
+    
+    from model.UnitaryControlTransformer import UnitaryControlTransformer
+    from model.UniversalModelTrainer import UniversalModelTrainer
+    from util.dataset.delta_control_SU2_dataset import build_SU2_dataset
+    from util.fidelity.fidelity import fidelity_entangled_control
+    from util.loss_function.loss_function import sharp_loss
+    from util.unitary_generator.unitary_generators import batched_unitary_generator_two_qubits_entangled
+    from util.error_sampler.error_sampler import two_qubit_error_sampler
+    import json
+    
+    # Load model config
+    config_path = "train/train_with_entanglement/model_config.json"
+    with open(config_path, "r") as f:
+        model_params = json.load(f)
+    
+    # Convert pulse_space values to tuples
+    if "pulse_space" in model_params:
+        for k, v in model_params["pulse_space"].items():
+            model_params["pulse_space"][k] = tuple(v)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = UnitaryControlTransformer(**model_params)
+    
+    # Create trainer with small monte carlo for testing
+    trainer = UniversalModelTrainer(
+        model=model,
+        unitary_generator=batched_unitary_generator_two_qubits_entangled,
+        error_sampler=two_qubit_error_sampler,
+        fidelity_fn=fidelity_entangled_control,
+        loss_fn=sharp_loss,
+        device=str(device),
+        monte_carlo=10  # Small for testing
+    )
+    
+    # Create small test batch
+    test_dataset = build_SU2_dataset(dataset_size=4, max_N=2, max_delta=1.5)
+    test_batch = torch.stack(test_dataset[:2])  # Take first 2 samples
+    
+    print(f"Test batch shape: {test_batch.shape}")
+    
+    try:
+        # Run one training step
+        loss, fidelity = trainer.train_epoch(test_batch)
+        print(f"Loss: {loss:.6f}")
+        print(f"Fidelity: {fidelity:.6f}")
+        
+        print("✓ Training step test passed!")
+        return True
+        
+    except Exception as e:
+        print(f"✗ Training step test failed!")
+        print(f"Error: {e}")
+        traceback.print_exc()
+        
+        # Additional debugging
+        if "illegal memory access" in str(e).lower():
+            print("\nCUDA Memory Access Error Detected!")
+            print("This typically happens due to:")
+            print("1. Tensor shape mismatches")
+            print("2. Operations on tensors from different devices")
+            print("3. In-place operations on tensors used in autograd")
+            
+        return False
+
+def main():
+    """Run all tests."""
+    print("="*60)
+    print("CUDA Debugging Script for Quantum Control Training")
+    print("="*60)
+    
+    # Check CUDA availability
+    if torch.cuda.is_available():
+        print(f"CUDA Available: Yes")
+        print(f"CUDA Version: {torch.version.cuda}")
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    else:
+        print("CUDA Available: No (using CPU)")
+    
+    # Set CUDA debugging flags
+    if torch.cuda.is_available():
+        os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+        torch.cuda.synchronize()
+        print("\nCUDA_LAUNCH_BLOCKING enabled for better error messages")
+    
+    # Run tests
+    tests = [
+        test_unitary_generator,
+        test_model_forward,
+        test_loss_computation,
+        test_training_step
+    ]
+    
+    results = []
+    for test in tests:
+        try:
+            result = test()
+            results.append(result)
+            if not result:
+                print(f"\nStopping tests due to failure in {test.__name__}")
+                break
+        except Exception as e:
+            print(f"\nUnexpected error in {test.__name__}: {e}")
+            results.append(False)
+            break
+    
+    # Summary
+    print("\n" + "="*60)
+    print("Test Summary")
+    print("="*60)
+    passed = sum(results)
+    total = len(results)
+    print(f"Passed: {passed}/{total}")
+    
+    if passed == total:
+        print("\n✓ All tests passed! The training should work.")
+    else:
+        print("\n✗ Some tests failed. Please fix the issues before training.")
+    
+    return passed == total
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)
