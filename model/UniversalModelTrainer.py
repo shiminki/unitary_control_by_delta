@@ -9,6 +9,8 @@ import torch.nn.functional as F
 
 from tqdm import tqdm
 import numpy as np
+import time
+from datetime import datetime, timedelta
 
 import matplotlib.pyplot as plt
 
@@ -23,7 +25,7 @@ class UniversalModelTrainer:
     
     Supports:
     - Single qubit control with error shape (N, 2): [delta, epsilon]
-    - Two-qubit entangled control with error shape (4, N): [delta_sys, epsilon, delta_anc, coupling_error]
+    - Two-qubit entangled control with error shape (N, 4): [delta_sys, epsilon, delta_anc, coupling_error]
     """
 
     def __init__(
@@ -43,7 +45,7 @@ class UniversalModelTrainer:
             model: UnitaryControlTransformer
             unitary_generator: Function (pulses, errors) -> U_out where
                 - For single qubit: pulses (B, L, 3), errors (B, 2)
-                - For two qubits: pulses (B, L, 5), errors (4, B)
+                - For two qubits: pulses (B, L, 5), errors (B, 4)
             error_sampler: Function (batch_size, device) -> errors
                 - Should return appropriate shape for the system
             fidelity_fn: Function (U_out, U_target) -> fidelity scores
@@ -66,6 +68,10 @@ class UniversalModelTrainer:
         # State tracking
         self.best_state: dict[str, torch.Tensor] | None = None
         self.best_fidelity: float = 0.0
+        
+        # Timing statistics
+        self.batch_times = []
+        self.avg_batch_time = None
 
     # ------------------------------------------------------------------
     # Helper: Sample delta and determine target unitary
@@ -85,7 +91,7 @@ class UniversalModelTrainer:
         Returns:
             errors: Appropriate shape for the system
                 - Single qubit: (batch_size * monte_carlo, 2)
-                - Two qubits: (4, batch_size * monte_carlo)
+                - Two qubits: (batch_size * monte_carlo, 4)
             targets: (batch_size * monte_carlo, d, d) target unitaries
                 - d=2 for single qubit, d=4 for two qubits
         """
@@ -101,21 +107,13 @@ class UniversalModelTrainer:
         
         # Sample interval indices and delta values
         interval_indices = np.random.randint(0, n, size=(batch_size, self.monte_carlo))
-        uniform_samples = np.random.rand(batch_size, self.monte_carlo)
         
         # Build target unitaries
         targets_list = []
-        sampled_deltas = np.zeros((batch_size, self.monte_carlo))
         
         for b in range(batch_size):
             for m in range(self.monte_carlo):
                 j = interval_indices[b, m]
-                
-                # Sample delta uniformly from [delta_j_start, delta_j_end]
-                delta_start = delta_ranges_cpu[b, j, 0]
-                delta_end = delta_ranges_cpu[b, j, 1]
-                delta = uniform_samples[b, m] * (delta_end - delta_start) + delta_start
-                sampled_deltas[b, m] = delta
                 
                 # Get target unitary from j-th rotation vector
                 n_x, n_y, n_z, theta = rotation_vecs[b, j]
@@ -128,7 +126,6 @@ class UniversalModelTrainer:
         # Sample errors using the provided error_sampler
         # The error_sampler should handle the specific error model
         errors = self.error_sampler(total_samples, self.device)
-        
         
         return errors, targets
     
@@ -152,7 +149,7 @@ class UniversalModelTrainer:
         return U
 
     # ------------------------------------------------------------------
-    # Training loop
+    # Training loop with timing
     # ------------------------------------------------------------------
 
     def train_epoch(self, data_batch: torch.Tensor) -> Tuple[float, float]:
@@ -190,13 +187,18 @@ class UniversalModelTrainer:
         # U_out: (batch_size * monte_carlo, d, d)
         U_out = self.unitary_generator(pulses_mc, errors)
         
-        # Compute loss - FIXED: Pass fidelity_fn as kwarg
-        if hasattr(self.loss_fn, '__self__'):
-            # If loss_fn is a bound method, call it directly
-            loss = self.loss_fn(U_out, targets)
-        else:
-            # If loss_fn is a function that needs fidelity_fn
+        # Compute loss - Handle different loss function signatures
+        try:
+            # Try calling with fidelity_fn as keyword argument (for sharp_loss, etc.)
             loss = self.loss_fn(U_out, targets, fidelity_fn=self.fidelity_fn)
+        except TypeError:
+            # If that fails, try without fidelity_fn (for lambda functions)
+            try:
+                loss = self.loss_fn(U_out, targets)
+            except Exception as e:
+                print(f"Error in loss function: {e}")
+                print(f"U_out shape: {U_out.shape}, targets shape: {targets.shape}")
+                raise
         
         # Compute mean fidelity for monitoring
         with torch.no_grad():
@@ -208,8 +210,6 @@ class UniversalModelTrainer:
         self.optimizer.step()
         
         return float(loss.item()), mean_fid
-
-
 
     # ------------------------------------------------------------------
     # Evaluation
@@ -248,7 +248,7 @@ class UniversalModelTrainer:
         return mean_fid
 
     # ------------------------------------------------------------------
-    # Top-level training orchestrator
+    # Top-level training orchestrator with enhanced progress tracking
     # ------------------------------------------------------------------
 
     def train(
@@ -260,6 +260,7 @@ class UniversalModelTrainer:
         plot: bool = False,
         save_epoch: int = None,
         log_interval: int = 1,
+        verbose_batch: bool = True,  # New parameter for batch-level logging
     ) -> None:
         """
         Train the model using the provided dataloaders.
@@ -272,6 +273,7 @@ class UniversalModelTrainer:
             plot: Whether to plot training curves
             save_epoch: Save checkpoint every N epochs
             log_interval: Log metrics every N epochs
+            verbose_batch: If True, show detailed batch progress
         """
         self.model.to(self.device)
         
@@ -283,7 +285,16 @@ class UniversalModelTrainer:
         print(f"{'Epoch':>6} | {'Train Loss':>12} | {'Train Fid':>10} | {'Eval Fid':>10} | {'Best Fid':>10} | {'Time':>8}")
         print("=" * 90)
         
-        import time
+        total_train_batches = len(list(train_dataloader))
+        total_eval_batches = len(list(eval_dataloader))
+        
+        print(f"\nTraining Details:")
+        print(f"  - Training batches per epoch: {total_train_batches}")
+        print(f"  - Evaluation batches per epoch: {total_eval_batches}")
+        print(f"  - Monte Carlo samples per batch: {self.monte_carlo}")
+        print(f"  - Verbose batch logging: {'Enabled' if verbose_batch else 'Disabled'}")
+        print()
+        
         for epoch in range(1, epochs + 1):
             epoch_start_time = time.time()
             
@@ -291,21 +302,98 @@ class UniversalModelTrainer:
             train_losses = []
             train_fids = []
             
-            for batch in tqdm(train_dataloader, desc=f"Epoch {epoch}/{epochs} [Train]", 
-                            leave=False, ncols=80, disable=False):
-                loss, fid = self.train_epoch(batch)
-                train_losses.append(loss)
-                train_fids.append(fid)
+            # Create progress bar with enhanced information
+            train_pbar = tqdm(
+                train_dataloader, 
+                desc=f"Epoch {epoch}/{epochs} [Train]",
+                total=total_train_batches,
+                ncols=120,
+                leave=verbose_batch
+            )
+            
+            try:
+                for batch_idx, batch in enumerate(train_pbar):
+                    batch_start_time = time.time()
+                    
+                    # Perform training step
+                    loss, fid = self.train_epoch(batch)
+                    
+                    batch_time = time.time() - batch_start_time
+                    self.batch_times.append(batch_time)
+                    
+                    # Update running average (use last 20 batches)
+                    recent_times = self.batch_times[-20:] if len(self.batch_times) > 20 else self.batch_times
+                    self.avg_batch_time = np.mean(recent_times)
+                    
+                    train_losses.append(loss)
+                    train_fids.append(fid)
+                    
+                    # Calculate ETA
+                    remaining_batches = total_train_batches - (batch_idx + 1)
+                    eta_seconds = remaining_batches * self.avg_batch_time if self.avg_batch_time else 0
+                    eta_str = str(timedelta(seconds=int(eta_seconds)))
+                    
+                    # Update progress bar with detailed information
+                    train_pbar.set_postfix({
+                        'Loss': f'{loss:.4f}',
+                        'Fid': f'{fid:.4f}',
+                        'Batch_Time': f'{batch_time:.1f}s',
+                        'Avg_Time': f'{self.avg_batch_time:.1f}s',
+                        'ETA': eta_str
+                    })
+                    
+                    # Verbose batch logging
+                    if verbose_batch and (batch_idx % 10 == 0 or batch_idx == 0):
+                        print(f"\n  Batch {batch_idx+1}/{total_train_batches}: "
+                              f"Loss={loss:.6f}, Fid={fid:.6f}, "
+                              f"Time={batch_time:.2f}s, "
+                              f"GPU_Mem={torch.cuda.memory_allocated()/1e9:.2f}GB")
+                        
+            except Exception as e:
+                print(f"\nError during training at epoch {epoch}, batch {batch_idx+1}:")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Error message: {e}")
+                
+                # Try to save current state before exiting
+                if save_path is not None:
+                    emergency_save = Path(save_path).parent / f"emergency_epoch{epoch}_batch{batch_idx}.pt"
+                    try:
+                        self._save_weight_checkpoint(emergency_save)
+                        print(f"Emergency checkpoint saved to {emergency_save}")
+                    except:
+                        print("Failed to save emergency checkpoint")
+                raise
             
             mean_train_loss = np.mean(train_losses)
             mean_train_fid = np.mean(train_fids)
             
-            # Evaluation phase
+            # Print training phase summary
+            print(f"\n  Training phase completed: Avg Loss={mean_train_loss:.6f}, Avg Fid={mean_train_fid:.6f}")
+            
+            # Evaluation phase with progress tracking
             eval_fids = []
-            for batch in tqdm(eval_dataloader, desc=f"Epoch {epoch}/{epochs} [Eval]", 
-                            leave=False, ncols=80, disable=False):
+            eval_pbar = tqdm(
+                eval_dataloader, 
+                desc=f"Epoch {epoch}/{epochs} [Eval]",
+                total=total_eval_batches,
+                ncols=120,
+                leave=False
+            )
+            
+            for batch_idx, batch in enumerate(eval_pbar):
+                batch_start_time = time.time()
+                
                 eval_fid = self.evaluate(batch)
                 eval_fids.append(eval_fid)
+                
+                batch_time = time.time() - batch_start_time
+                
+                # Update progress bar
+                eval_pbar.set_postfix({
+                    'Fid': f'{eval_fid:.4f}',
+                    'Batch_Time': f'{batch_time:.1f}s',
+                    'Progress': f'{batch_idx+1}/{total_eval_batches}'
+                })
             
             mean_eval_fid = np.mean(eval_fids)
             
@@ -316,13 +404,19 @@ class UniversalModelTrainer:
                     k: v.detach().cpu().clone() 
                     for k, v in self.model.state_dict().items()
                 }
+                print(f"  ★ New best model! Fidelity: {self.best_fidelity:.6f}")
             
             epoch_time = time.time() - epoch_start_time
             
-            # Log metrics at specified interval
-            if epoch % log_interval == 0 or epoch == 1 or epoch == epochs:
-                print(f"{epoch:6d} | {mean_train_loss:12.6f} | {mean_train_fid:10.6f} | "
-                      f"{mean_eval_fid:10.6f} | {self.best_fidelity:10.6f} | {epoch_time:7.1f}s")
+            # Log epoch metrics
+            print(f"{epoch:6d} | {mean_train_loss:12.6f} | {mean_train_fid:10.6f} | "
+                  f"{mean_eval_fid:10.6f} | {self.best_fidelity:10.6f} | {epoch_time:7.1f}s")
+            
+            # Estimate total remaining time
+            avg_epoch_time = epoch_time
+            remaining_epochs = epochs - epoch
+            total_eta = remaining_epochs * avg_epoch_time
+            print(f"  Estimated time remaining: {str(timedelta(seconds=int(total_eta)))}")
             
             fidelity_history.append(mean_eval_fid)
             loss_history.append(mean_train_loss)
@@ -331,9 +425,15 @@ class UniversalModelTrainer:
             if save_epoch is not None and epoch % save_epoch == 0 and save_path is not None:
                 epoch_save_path = Path(save_path).parent / f"{Path(save_path).stem}_epoch{epoch}.pt"
                 self._save_weight_checkpoint(epoch_save_path)
+            
+            # Clear some GPU cache if needed
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         print("=" * 90)
-        print(f"Training completed! Best fidelity: {self.best_fidelity:.6f}\n")
+        print(f"Training completed! Best fidelity: {self.best_fidelity:.6f}")
+        print(f"Average batch processing time: {self.avg_batch_time:.2f}s")
+        print()
         
         # Reload best weights
         if self.best_state is not None:
@@ -435,4 +535,3 @@ class UniversalModelTrainer:
             fidelities.append(fid)
         
         return np.mean(fidelities)
-
