@@ -77,6 +77,7 @@ class UniversalModelTrainer:
     # Helper: Sample delta and determine target unitary
     # ------------------------------------------------------------------
     
+    
     def sample_monte_carlo_batch(
         self, 
         data_batch: torch.Tensor
@@ -90,63 +91,97 @@ class UniversalModelTrainer:
         
         Returns:
             errors: Appropriate shape for the system
-                - Single qubit: (batch_size * monte_carlo, 2)
-                - Two qubits: (batch_size * monte_carlo, 4)
             targets: (batch_size * monte_carlo, d, d) target unitaries
-                - d=2 for single qubit, d=4 for two qubits
         """
         batch_size, n, _ = data_batch.shape
         total_samples = batch_size * self.monte_carlo
         
-        # Move data_batch to device if not already
+        # Move data_batch to device if not already, for rotation vec access
         data_batch = data_batch.to(self.device)
         
-        # Extract delta ranges and rotation vectors for sampling
-        delta_ranges_cpu = data_batch[..., :2].cpu().numpy()  # (batch_size, n, 2)
-        rotation_vecs = data_batch[..., 2:].cpu().numpy()  # (batch_size, n, 4)
+        # Sample interval indices
+        # interval_indices: (batch_size, monte_carlo)
+        interval_indices = torch.randint(0, n, size=(batch_size, self.monte_carlo), device=self.device)
         
-        # Sample interval indices and delta values
-        interval_indices = np.random.randint(0, n, size=(batch_size, self.monte_carlo))
+        # Reshape interval_indices to (total_samples,) and create batch indices
+        # linear_indices: (total_samples,) - the index j in (b, j, 6)
+        linear_indices = interval_indices.flatten() 
+        # batch_indices: (total_samples,) - the index b in (b, j, 6)
+        batch_indices = torch.arange(batch_size, device=self.device).repeat_interleave(self.monte_carlo)
+
+        # Get the (n_x, n_y, n_z, theta) for all total_samples at once
+        # rotation_vecs_mc: (total_samples, 4)
+        # Note: data_batch[batch_indices, linear_indices, 2:] is the most concise way 
+        # to implement this 'fancy indexing' in PyTorch for this specific case.
+        rotation_vecs_mc = data_batch[batch_indices, linear_indices, 2:] 
         
-        # Build target unitaries
-        targets_list = []
-        
-        for b in range(batch_size):
-            for m in range(self.monte_carlo):
-                j = interval_indices[b, m]
-                
-                # Get target unitary from j-th rotation vector
-                n_x, n_y, n_z, theta = rotation_vecs[b, j]
-                U = self._rotation_unitary(n_x, n_y, n_z, theta)
-                targets_list.append(U)
-        
-        # Stack targets and move to GPU
-        targets = torch.stack(targets_list).to(self.device)
+        # Generate target unitaries (Vectorized)
+        targets = self._rotation_unitary(
+            rotation_vecs_mc[..., 0], # n_x
+            rotation_vecs_mc[..., 1], # n_y
+            rotation_vecs_mc[..., 2], # n_z
+            rotation_vecs_mc[..., 3]  # theta
+        )
+        # targets is now (total_samples, 2, 2) on the device
         
         # Sample errors using the provided error_sampler
-        # The error_sampler should handle the specific error model
+        # errors: appropriate shape for the system, on device
         errors = self.error_sampler(total_samples, self.device)
         
         return errors, targets
     
-    @staticmethod
-    def _rotation_unitary(n_x: float, n_y: float, n_z: float, theta: float) -> torch.Tensor:
+    def _rotation_unitary(
+        self, 
+        n_x: torch.Tensor, 
+        n_y: torch.Tensor, 
+        n_z: torch.Tensor, 
+        theta: torch.Tensor
+    ) -> torch.Tensor:
         """
-        Construct rotation unitary exp(-i * theta/2 * n·σ).
+        Vectorized construction of rotation unitary exp(-i * theta/2 * n·σ).
+        
+        Args:
+            n_x, n_y, n_z, theta: Tensors of shape (total_samples,) on device.
         
         Returns:
-            (2, 2) complex unitary matrix on CPU (will be moved to GPU in batch)
+            (total_samples, 2, 2) complex unitary matrix on device.
         """
-        c = math.cos(theta / 2)
-        s = math.sin(theta / 2)
+        # Ensure all inputs are complex for stability
+        theta_half = theta / 2.0
         
-        # exp(-i * theta/2 * n·σ) = cos(theta/2)*I - i*sin(theta/2)*(n_x*X + n_y*Y + n_z*Z)
-        U = torch.tensor([
-            [c - 1j * s * n_z, -1j * s * (n_x - 1j * n_y)],
-            [-1j * s * (n_x + 1j * n_y), c + 1j * s * n_z]
-        ], dtype=torch.cdouble)
+        # Cosine and Sine of rotation angle
+        c = torch.cos(theta_half)
+        s = torch.sin(theta_half)
         
-        return U
+        # Components of -i * sin(theta/2) * (n_x*X + n_y*Y + n_z*Z)
+        i_s = -1j * s.to(torch.complex128) # Complex scalar: (-i * sin(theta/2))
+        
+        # The complex components needed for off-diagonal
+        i_s_nx = i_s * n_x.to(torch.complex128)
+        i_s_ny = i_s * n_y.to(torch.complex128)
+        i_s_nz = i_s * n_z.to(torch.complex128)
+
+        # Build the 2x2 matrix using torch.stack and torch.cat
+        # U = cos(a)I - i*sin(a)*(n_x*X + n_y*Y + n_z*Z)
+        
+        # Diagonal elements: c +/- i_s_nz
+        u00 = c.to(torch.complex128) + i_s_nz
+        u11 = c.to(torch.complex128) - i_s_nz
+        
+        # Off-diagonal elements: -i*s*(n_x - i*n_y) and -i*s*(n_x + i*n_y)
+        # U01: -i*s*n_x + (-i*s)*(-i*n_y) = -i*s*n_x - s*n_y = -s(i*n_x + n_y)
+        u01 = i_s_nx + i_s_ny * 1j # -i*s*n_x + s*n_y
+        
+        # U10: -i*s*n_x - (-i*s)*(-i*n_y) = -i*s*n_x + s*n_y
+        u10 = i_s_nx - i_s_ny * 1j # -i*s*n_x - s*n_y
+        
+        # Stack the components: (total_samples, 2, 2)
+        U = torch.stack([
+            torch.stack([u00, u01], dim=-1),
+            torch.stack([u10, u11], dim=-1)
+        ], dim=-2)
+        
+        return U.contiguous() # Ensure memory is contiguous
 
     # ------------------------------------------------------------------
     # Training loop with timing
