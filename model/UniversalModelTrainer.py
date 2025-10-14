@@ -1,7 +1,7 @@
 import math
 from typing import Callable, Dict, Sequence, Tuple, Optional, List, Union
 from pathlib import Path
-import os
+import os, sys
 
 import torch
 import torch.nn as nn
@@ -12,45 +12,53 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 
-from model.unitary_control_transformer import UnitaryControlTransformer
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+
+from model.UnitaryControlTransformer import UnitaryControlTransformer
 
 
 class UniversalModelTrainer:
-    """Trainer for UnitaryControlTransformer with delta-range aware training."""
+    """
+    Universal trainer for UnitaryControlTransformer supporting multiple qubit systems.
+    
+    Supports:
+    - Single qubit control with error shape (N, 2): [delta, epsilon]
+    - Two-qubit entangled control with error shape (4, N): [delta_sys, epsilon, delta_anc, coupling_error]
+    """
 
     def __init__(
         self,
         model: UnitaryControlTransformer,
         unitary_generator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        error_sampler: Callable[[int, torch.device], torch.Tensor],
         *,
         fidelity_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         optimizer: Optional[torch.optim.Optimizer] = None,
         monte_carlo: int = 10000,
-        epsilon_std: float = 0.05,
         device: str = "cuda",
     ) -> None:
         """
         Args:
             model: UnitaryControlTransformer
             unitary_generator: Function (pulses, errors) -> U_out where
-                - pulses: (B, max_pulses, param_dim)
-                - errors: (B, 2) with (delta, epsilon)
-                - U_out: (B, 2, 2)
+                - For single qubit: pulses (B, L, 3), errors (B, 2)
+                - For two qubits: pulses (B, L, 5), errors (4, B)
+            error_sampler: Function (batch_size, device) -> errors
+                - Should return appropriate shape for the system
             fidelity_fn: Function (U_out, U_target) -> fidelity scores
             loss_fn: Optional loss function, defaults to 1 - mean(fidelity)
             optimizer: Optional optimizer, defaults to Adam(lr=3e-5)
             monte_carlo: Number of Monte Carlo samples per batch
-            epsilon_std: Standard deviation for Gaussian noise epsilon
             device: Training device
         """
         print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
         self.model = model.to(device)
         self.unitary_generator = unitary_generator
+        self.error_sampler = error_sampler
         self.fidelity_fn = fidelity_fn
         self.loss_fn = loss_fn or (lambda U_out, U_target: 1.0 - self.fidelity_fn(U_out, U_target).mean())
         self.monte_carlo = monte_carlo
-        self.epsilon_std = epsilon_std
         self.device = device
 
         self.optimizer = optimizer or torch.optim.Adam(self.model.parameters(), lr=3e-5)
@@ -66,7 +74,7 @@ class UniversalModelTrainer:
     def sample_monte_carlo_batch(
         self, 
         data_batch: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Sample Monte Carlo errors and determine corresponding target unitaries.
         
@@ -75,9 +83,11 @@ class UniversalModelTrainer:
                        (delta_start, delta_end, n_x, n_y, n_z, theta)
         
         Returns:
-            errors: (batch_size * monte_carlo, 2) with (delta, epsilon)
-            targets: (batch_size * monte_carlo, 2, 2) target unitaries
-            data_batch_repeated: (batch_size * monte_carlo, n, 6) for model input
+            errors: Appropriate shape for the system
+                - Single qubit: (batch_size * monte_carlo, 2)
+                - Two qubits: (4, batch_size * monte_carlo)
+            targets: (batch_size * monte_carlo, d, d) target unitaries
+                - d=2 for single qubit, d=4 for two qubits
         """
         batch_size, n, _ = data_batch.shape
         total_samples = batch_size * self.monte_carlo
@@ -85,57 +95,42 @@ class UniversalModelTrainer:
         # Move data_batch to device if not already
         data_batch = data_batch.to(self.device)
         
-        # Repeat data_batch for monte carlo samples
-        # Shape: (batch_size, monte_carlo, n, 6)
-        data_expanded = data_batch.unsqueeze(1).repeat(1, self.monte_carlo, 1, 1)
-        # Reshape to (batch_size * monte_carlo, n, 6)
-        data_repeated = data_expanded.reshape(total_samples, n, 6)
-        
-        # Extract delta ranges: (batch_size, monte_carlo, n, 2)
-        delta_ranges = data_expanded[..., :2]  # (batch_size, monte_carlo, n, 2)
-        
-        # Sample deltas uniformly from the intervals
-        # For each sample, pick one of the n intervals and sample uniformly
-        errors = torch.zeros(total_samples, 2, device=self.device, dtype=torch.float32)
-        targets = torch.zeros(total_samples, 2, 2, dtype=torch.cdouble, device=self.device)
-        
-        # Extract all rotation vectors at once to avoid repeated CPU-GPU transfers
+        # Extract delta ranges and rotation vectors for sampling
+        delta_ranges_cpu = data_batch[..., :2].cpu().numpy()  # (batch_size, n, 2)
         rotation_vecs = data_batch[..., 2:].cpu().numpy()  # (batch_size, n, 4)
-        delta_ranges_cpu = delta_ranges.cpu().numpy()  # (batch_size, monte_carlo, n, 2)
         
-        # Sample all at once
+        # Sample interval indices and delta values
         interval_indices = np.random.randint(0, n, size=(batch_size, self.monte_carlo))
         uniform_samples = np.random.rand(batch_size, self.monte_carlo)
-        epsilon_samples = np.random.randn(batch_size, self.monte_carlo) * self.epsilon_std
         
-        # Vectorized construction
-        errors_np = np.zeros((total_samples, 2), dtype=np.float32)
+        # Build target unitaries
         targets_list = []
+        sampled_deltas = np.zeros((batch_size, self.monte_carlo))
         
         for b in range(batch_size):
             for m in range(self.monte_carlo):
-                idx = b * self.monte_carlo + m
                 j = interval_indices[b, m]
                 
-                # Sample delta
-                delta_start = delta_ranges_cpu[b, m, j, 0]
-                delta_end = delta_ranges_cpu[b, m, j, 1]
+                # Sample delta uniformly from [delta_j_start, delta_j_end]
+                delta_start = delta_ranges_cpu[b, j, 0]
+                delta_end = delta_ranges_cpu[b, j, 1]
                 delta = uniform_samples[b, m] * (delta_end - delta_start) + delta_start
-                epsilon = epsilon_samples[b, m]
+                sampled_deltas[b, m] = delta
                 
-                errors_np[idx, 0] = delta
-                errors_np[idx, 1] = epsilon
-                
-                # Get target unitary
+                # Get target unitary from j-th rotation vector
                 n_x, n_y, n_z, theta = rotation_vecs[b, j]
                 U = self._rotation_unitary(n_x, n_y, n_z, theta)
                 targets_list.append(U)
         
-        # Move to GPU in batch
-        errors = torch.from_numpy(errors_np).to(self.device)
+        # Stack targets and move to GPU
         targets = torch.stack(targets_list).to(self.device)
         
-        return errors, targets, data_repeated
+        # Sample errors using the provided error_sampler
+        # The error_sampler should handle the specific error model
+        errors = self.error_sampler(total_samples, self.device)
+        
+        
+        return errors, targets
     
     @staticmethod
     def _rotation_unitary(n_x: float, n_y: float, n_z: float, theta: float) -> torch.Tensor:
@@ -182,32 +177,21 @@ class UniversalModelTrainer:
         # pulses: (batch_size, max_pulses, param_dim)
         pulses = self.model(data_batch)
         
-        # Ensure pulses are on GPU
-        assert pulses.device.type == self.device.split(':')[0], f"Pulses on {pulses.device}, expected {self.device}"
-        
         # Sample Monte Carlo errors and targets
-        # errors: (batch_size * monte_carlo, 2)
-        # targets: (batch_size * monte_carlo, 2, 2)
-        # data_repeated: (batch_size * monte_carlo, n, 6)
-        errors, targets, data_repeated = self.sample_monte_carlo_batch(data_batch)
-        
-        # Ensure errors and targets are on GPU
-        assert errors.device.type == self.device.split(':')[0], f"Errors on {errors.device}, expected {self.device}"
-        assert targets.device.type == self.device.split(':')[0], f"Targets on {targets.device}, expected {self.device}"
+        # errors: appropriate shape for system
+        # targets: (batch_size * monte_carlo, d, d)
+        errors, targets = self.sample_monte_carlo_batch(data_batch)
         
         # Repeat pulses for Monte Carlo samples
         # pulses_mc: (batch_size * monte_carlo, max_pulses, param_dim)
         pulses_mc = pulses.repeat_interleave(self.monte_carlo, dim=0)
         
         # Generate output unitaries
-        # U_out: (batch_size * monte_carlo, 2, 2)
+        # U_out: (batch_size * monte_carlo, d, d)
         U_out = self.unitary_generator(pulses_mc, errors)
         
-        # Ensure U_out is on GPU
-        assert U_out.device.type == self.device.split(':')[0], f"U_out on {U_out.device}, expected {self.device}"
-        
         # Compute loss
-        loss = self.loss_fn(U_out, targets)
+        loss = self.loss_fn(U_out, targets, fidelity_fn=self.fidelity_fn)
         
         # Compute mean fidelity for monitoring
         with torch.no_grad():
@@ -243,7 +227,7 @@ class UniversalModelTrainer:
         pulses = self.model(data_batch)
         
         # Sample Monte Carlo errors and targets
-        errors, targets, data_repeated = self.sample_monte_carlo_batch(data_batch)
+        errors, targets = self.sample_monte_carlo_batch(data_batch)
         
         # Repeat pulses for Monte Carlo samples
         pulses_mc = pulses.repeat_interleave(self.monte_carlo, dim=0)
@@ -300,7 +284,6 @@ class UniversalModelTrainer:
             train_losses = []
             train_fids = []
             
-            # Use tqdm only for batch progress, but disable output unless verbose
             for batch in tqdm(train_dataloader, desc=f"Epoch {epoch}/{epochs} [Train]", 
                             leave=False, ncols=80, disable=False):
                 loss, fid = self.train_epoch(batch)
@@ -446,56 +429,3 @@ class UniversalModelTrainer:
         
         return np.mean(fidelities)
 
-
-# Example usage
-if __name__ == "__main__":
-    # Mock components for testing
-    class MockModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.linear = nn.Linear(6, 10)
-            self.num_qubits = 1
-        
-        def forward(self, x):
-            # x: (B, n, 6) -> output: (B, max_pulses, param_dim)
-            B, n, _ = x.shape
-            return torch.randn(B, 4, 3)  # Example output
-    
-    def mock_unitary_generator(pulses, errors):
-        # pulses: (B, max_pulses, param_dim)
-        # errors: (B, 2)
-        B = pulses.shape[0]
-        return torch.eye(2, dtype=torch.cdouble).unsqueeze(0).repeat(B, 1, 1)
-    
-    def mock_fidelity_fn(U_out, U_target):
-        # Simple mock: return random fidelities
-        B = U_out.shape[0]
-        return torch.rand(B)
-    
-    # Create mock dataloaders
-    from su2_dataloader import build_SU2_dataset, SU2DataLoader
-    
-    dataset = build_SU2_dataset(dataset_size=1000, max_N=2)
-    train_loader = SU2DataLoader(dataset[:800], batch_size=32, shuffle=True)
-    eval_loader = SU2DataLoader(dataset[800:], batch_size=32, shuffle=False)
-    
-    # Create trainer
-    model = MockModel()
-    trainer = UniversalModelTrainer(
-        model=model,
-        unitary_generator=mock_unitary_generator,
-        fidelity_fn=mock_fidelity_fn,
-        monte_carlo=100,  # Smaller for testing
-        device="cpu"
-    )
-    
-    # Train
-    trainer.train(
-        train_dataloader=train_loader,
-        eval_dataloader=eval_loader,
-        epochs=2,
-        save_path="test_checkpoint.pt",
-        plot=True
-    )
-    
-    print("✓ Trainer test completed!")

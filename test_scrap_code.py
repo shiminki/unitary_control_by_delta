@@ -7,8 +7,8 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
 
-from model.unitary_control_transformer import UnitaryControlTransformer
-from model.unitary_control_trainer import UniversalModelTrainer
+from model.UnitaryControlTransformer import UnitaryControlTransformer
+from model.UniversalModelTrainer import UniversalModelTrainer
 
 from train.train import *
 
@@ -289,7 +289,7 @@ print(f"Example batch data (first batch):   {next(iter(dataloader)).shape}")
 
 
 
-from model.unitary_control_transformer import UnitaryControlTransformer
+from model.UnitaryControlTransformer import UnitaryControlTransformer
 
 model = UnitaryControlTransformer(
     num_qubits=1, pulse_space={'omega_sys': [0.0, 1.0], 'phi_sys': [-3.15, 3.15], "tau": [0.1, 0.5]},
