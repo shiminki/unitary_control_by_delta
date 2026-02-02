@@ -328,7 +328,7 @@ def plot_matrix_element_vs_delta(
 
     tau = math.pi/(4 * Delta_0)
     K = len(phi) - 1
-    T = K * tau + sum(phi).item() / (Omega)
+    T = K * tau + sum(phi.abs()).item() / (Omega)
 
 
     ax.set_xlabel("Detuning δ (MHz)")
@@ -412,7 +412,7 @@ def plot_u00_vs_delta(
 
     tau = math.pi/(4 * Delta_0)
     K = len(phi) - 1
-    T = K * tau + sum(phi).item() / (Omega)
+    T = K * tau + sum(phi.abs()).item() / (Omega)
 
 
     ax.set_xlabel("Detuning δ (MHz)")

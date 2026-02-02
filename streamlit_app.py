@@ -101,6 +101,9 @@ delta_raw = st.text_area("delta_vals (MHz, length N)", value=delta_default, heig
 
 run_btn = st.button("Run Training")
 
+if "results" not in st.session_state:
+    st.session_state["results"] = None
+
 if run_btn:
     alpha_list, alpha_err = parse_float_list(alpha_raw)
     delta_list, delta_err = parse_float_list(delta_raw)
@@ -148,7 +151,6 @@ if run_btn:
             st.warning("Some delta_vals exceed |Delta_0| after unit conversion.")
 
         with st.spinner("Training..."):
-
             progress_bar = st.progress(0)
             progress_text = st.empty()
 
@@ -165,27 +167,33 @@ if run_btn:
                 delta_vals,
                 alpha_vals,
                 sample_size=2048,
-                progress_cb=progress_cb
+                progress_cb=progress_cb,
             )
 
-        st.success(f"Training complete. Final loss: {final_loss:.6e}")
+        tau_us = (math.pi / (4.0 * cfg.Delta_0))
+        omega_2pi_mhz = float(Omega_max)
+        delta_2pi_mhz = float(Delta_0)
+        t_rows = []
+        hx_rows = []
+        hz_rows = []
+        for i, phi in enumerate(phi_final.tolist()):
+            t_rows.append(np.abs(phi) / cfg.Omega_max)
+            hx_rows.append(omega_2pi_mhz * np.sign(phi))
+            hz_rows.append(0.0)
+            if i != len(phi_final) - 1:
+                t_rows.append(tau_us)
+                hx_rows.append(0.0)
+                hz_rows.append(delta_2pi_mhz)
 
-        phi_df = pd.DataFrame({"index": np.arange(len(phi_final)), "phi": phi_final.numpy()})
-        csv_path = os.path.join(
-            out_dir,
-            f"learned_phases_K={int(K)}_final_loss_{final_loss:.6f}noisy_control_{cfg.build_with_detuning}.csv",
+        pulse_df = pd.DataFrame(
+            {
+                "t (us)": t_rows,
+                "H_x (2pi MHz)": hx_rows,
+                "H_z (2pi MHz)": hz_rows,
+            }
         )
-        phi_df.to_csv(csv_path, index=True)
 
-        st.write(f"Saved phases CSV: `{csv_path}`")
-        st.download_button(
-            label="Download phases CSV",
-            data=phi_df.to_csv(index=True).encode("utf-8"),
-            file_name=os.path.basename(csv_path),
-            mime="text/csv",
-        )
         plot_path = os.path.join(out_dir, f"u00_final_K={int(K)}.png")
-
         plot_matrix_element_vs_delta(
             phi_final, cfg.Omega_max, delta_vals, alpha_vals,
             cfg.Delta_0, cfg.end_with_W, cfg.device,
@@ -194,22 +202,43 @@ if run_btn:
             build_with_detuning=cfg.build_with_detuning,
         )
 
-        if os.path.exists(plot_path):
-            st.subheader("Matrix Element vs Delta Plot")
-            st.image(plot_path, caption="Matrix element vs delta", use_container_width=True)
-        else:
-            st.info(f"Plot not found at `{plot_path}`")
+        st.session_state["results"] = {
+            "final_loss": final_loss,
+            "pulse_df": pulse_df,
+            "plot_path": plot_path,
+            "args": {
+                "K": int(K),
+                "steps": int(steps),
+                "num_peaks": int(N),
+                "Delta_0": float(Delta_0),
+                "signal_window": float(signal_window),
+                "Omega_max": float(Omega_max),
+                "lr": float(lr),
+                "device": device,
+                "end_with_W": end_with_W,
+                "out_dir": out_dir,
+                "build_with_detuning": build_with_detuning,
+            },
+        }
 
-        st.write("Args used:", {
-            "K": int(K),
-            "steps": int(steps),
-            "num_peaks": int(N),
-            "Delta_0": float(Delta_0),
-            "signal_window": float(signal_window),
-            "Omega_max": float(Omega_max),
-            "lr": float(lr),
-            "device": device,
-            "end_with_W": end_with_W,
-            "out_dir": out_dir,
-            "build_with_detuning": build_with_detuning,
-        })
+if st.session_state["results"] is not None:
+    results = st.session_state["results"]
+    st.success(f"Training complete. Final loss: {results['final_loss']:.6e}")
+
+    st.subheader("Pulse Schedule")
+    st.dataframe(results["pulse_df"], use_container_width=True)
+    st.download_button(
+        label="Download pulse schedule CSV",
+        data=results["pulse_df"].to_csv(index=False).encode("utf-8"),
+        file_name="pulse_schedule.csv",
+        mime="text/csv",
+        key="download_pulse_csv",
+    )
+
+    if os.path.exists(results["plot_path"]):
+        st.subheader("Matrix Element vs Delta Plot")
+        st.image(results["plot_path"], caption="Matrix element vs delta", use_container_width=True)
+    else:
+        st.info(f"Plot not found at `{results['plot_path']}`")
+
+    st.write("Args used:", results["args"])
