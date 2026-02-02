@@ -326,7 +326,7 @@ def plot_matrix_element_vs_delta(
             fontsize=9
         )
 
-    tau = math.pi/(4 * Delta_0)
+    tau = 1/(8 * Delta_0)
     K = len(phi) - 1
     T = K * tau + sum(phi.abs()).item() / (Omega)
 
@@ -374,8 +374,6 @@ def plot_u00_vs_delta(
     ax.plot(delta_range, u00.real, label="Re(u_00)")
     ax.plot(delta_range, u00.imag, label="Im(u_00)")
 
-
-    theta_vals = (math.pi / 4) * (1 + delta_vals / Delta_0)  # (M,)
 
     for i, delta in enumerate(delta_vals):
         alpha_i = alpha_vals[i]
