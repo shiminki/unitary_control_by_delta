@@ -195,10 +195,10 @@ if run_btn:
 
         plot_path = os.path.join(out_dir, f"u00_final_K={int(K)}.png")
         plot_matrix_element_vs_delta(
-            phi_final, cfg.Omega_max, delta_vals, alpha_vals,
-            cfg.Delta_0, cfg.end_with_W, cfg.device,
+            phi_final, cfg.Omega_max, delta_vals / (2 * math.pi), alpha_vals,
+            cfg.Delta_0 / (2 * math.pi), cfg.end_with_W, cfg.device,
             out_path=plot_path,
-            delta_width=cfg.singal_window,
+            delta_width=cfg.singal_window / (2 * math.pi),
             build_with_detuning=cfg.build_with_detuning,
         )
 
@@ -237,8 +237,7 @@ if st.session_state["results"] is not None:
 
     if os.path.exists(results["plot_path"]):
         st.subheader("Matrix Element vs Delta Plot")
-        st.image(results["plot_path"], caption="Matrix element vs delta", use_column_width=True)
-
+        st.image(results["plot_path"], caption="Matrix element vs delta", use_container_width=True)
     else:
         st.info(f"Plot not found at `{results['plot_path']}`")
 
