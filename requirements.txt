@@ -1,2 +1,6 @@
 torch
-pyqsp
+tqdm
+matplotlib
+numpy
+pandas
+streamlit

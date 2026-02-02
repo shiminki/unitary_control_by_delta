@@ -24,27 +24,52 @@ def parse_float_list(raw: str) -> Tuple[List[float], str]:
     return values, ""
 
 
-st.set_page_config(page_title="QSP Fit Relaxed Demo", layout="wide")
-st.title("QSP Fit Relaxed Demo (Streamlit)")
+st.set_page_config(page_title="Controlled Unitary Demo", layout="wide")
+st.title("Controlled Unitary Demo via QSP with Relaxed Constraints")
 
 
-description = """
+description = r"""
 This demo allows you to generate control sequence for implementing target X-rotations
-on a qubit using detuning as the control parameter. To be specific for a given list of delta_vals
-and alpha_vals, we train a QSP sequence of phases to realize R_x(alpha_i) when delta = delta_i +/- signal_window.
+on a qubit using detuning as the control parameter. For a given list of delta_vals
+and alpha_vals, we train a QSP sequence of phases to realize $R_x(\alpha_i)$ when detuning is near
+$\delta_i$. Specifically, the target is to achieve
 
-Configure all arguments from `qsp_fit_relaxed.py`. Key parameters are
+$R_x(\alpha_i)$ when $\delta = \delta_i \pm \sigma$.
 
-`N`: Number of target gates (or number of peaks in the detuning distribution)\n
-`K`: Maximum phase index (controls the length of the control sequence)\n
-`Delta_0`: Maximum detuning (MHz). Detuning distributions should be within [-Delta_0, Delta_0].\n
-`delta_vals`: List of detuning values (MHz) at which target gates are defined.\n
-`alpha_vals`: List of target rotation angles (in units of pi) corresponding to each delta\n
-`signal_window`: Width of the detuning signal window (MHz). \n
+for some window width $\sigma$ specified by `signal_window` = $\sigma$.
+
+ Key parameters are 
+
+`N`: Number of target gates (or number of peaks in the detuning distribution)
+
+`K`: NUmber of control gates. QSP sequence will generate polynomial $P(x)$ of degree at most $K$.
+
+`Delta_0`: Maximum detuning (2$\pi$ MHz). Detuning distributions should be within $[-\Delta_0, \Delta_0]$.
+
+`delta_vals`: List of detuning values (2$\pi$ MHz) at which target gates are defined.
+
+`alpha_vals`: List of target rotation angles (in units of pi) corresponding to each delta
+
+`signal_window`: Width of the detuning signal window (2$\pi$ MHz).
+
 `build_with_detuning`: Whether to include detuning in the signal operator of QSP. When set to False, we are assuming infinitely fast control.
 """
 
 st.markdown(description)
+
+st.subheader("Disclaimer and Setup Instructions")
+
+disclaimer = """
+With `build_with_detuning` enabled, a reasonable `K` should be around 100. 
+However, the streamlit server will take a while to run (~30 min), and we recommend to run this demo locally (~10 min). 
+To do so, please follow the instruction below:
+
+1. Clone the repository: `git clone https://github.com/shiminki/unitary_control_by_delta.git`
+2. Install the necessary requirements: `pip install -r requirements.txt`
+3. Run the streamlit app: `streamlit run streamlit_app.py`
+"""
+
+st.markdown(disclaimer)
 
 col1, col2 = st.columns(2)
 
@@ -53,14 +78,14 @@ with col1:
     K = st.number_input("K (max phase index)", min_value=1, value=30, step=1)
     N = st.number_input("N (num_peaks = number of gates)", min_value=1, value=4, step=1)
     Delta_0 = st.number_input("Delta_0 (MHz)", min_value=0.0, value=100.0, step=1.0)
-    signal_window = st.number_input("signal_window (MHz)", min_value=0.0, value=10.0, step=0.1)
+    signal_window = st.number_input("signal_window (MHz)", min_value=0.0, value=5.0, step=0.1)
     Omega_max = st.number_input("Omega_max (MHz)", min_value=0.0, value=80.0, step=1.0)
     build_with_detuning = st.checkbox("build_with_detuning", value=False)
     
 
 with col2:
     st.subheader("Other Arguments")
-    steps = st.number_input("training steps", min_value=1, value=5000, step=100)
+    steps = st.number_input("training steps", min_value=1, value=2000, step=100)
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
     lr = st.number_input("lr", min_value=0.0, value=5e-2, step=1e-3, format="%.6f")
     device = st.selectbox("device", options=["cpu", "cuda"], index=0 if default_device == "cpu" else 1)
@@ -153,6 +178,12 @@ if run_btn:
         phi_df.to_csv(csv_path, index=True)
 
         st.write(f"Saved phases CSV: `{csv_path}`")
+        st.download_button(
+            label="Download phases CSV",
+            data=phi_df.to_csv(index=True).encode("utf-8"),
+            file_name=os.path.basename(csv_path),
+            mime="text/csv",
+        )
         plot_path = os.path.join(out_dir, f"u00_final_K={int(K)}.png")
 
         plot_matrix_element_vs_delta(
