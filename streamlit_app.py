@@ -57,6 +57,20 @@ for some window width $\sigma$ specified by `signal_window` = $\sigma$.
 
 st.markdown(description)
 
+st.subheader("Disclaimer and Setup Instructions")
+
+disclaimer = """
+With `build_with_detuning` enabled, a reasonable `K` should be around 100. 
+However, the streamlit server will take a while to run (~30 min), and we recommend to run this demo locally (~10 min). 
+To do so, please follow the instruction below:
+
+1. Clone the repository: `git clone https://github.com/shiminki/unitary_control_by_delta.git`
+2. Install the necessary requirements: `pip install -r requirements.txt`
+3. Run the streamlit app: `streamlit run streamlit_app.py`
+"""
+
+st.markdown(disclaimer)
+
 col1, col2 = st.columns(2)
 
 with col1:
@@ -164,6 +178,12 @@ if run_btn:
         phi_df.to_csv(csv_path, index=True)
 
         st.write(f"Saved phases CSV: `{csv_path}`")
+        st.download_button(
+            label="Download phases CSV",
+            data=phi_df.to_csv(index=True).encode("utf-8"),
+            file_name=os.path.basename(csv_path),
+            mime="text/csv",
+        )
         plot_path = os.path.join(out_dir, f"u00_final_K={int(K)}.png")
 
         plot_matrix_element_vs_delta(
