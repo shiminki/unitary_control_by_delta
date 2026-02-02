@@ -24,23 +24,34 @@ def parse_float_list(raw: str) -> Tuple[List[float], str]:
     return values, ""
 
 
-st.set_page_config(page_title="QSP Fit Relaxed Demo", layout="wide")
-st.title("QSP Fit Relaxed Demo (Streamlit)")
+st.set_page_config(page_title="Controlled Unitary Demo", layout="wide")
+st.title("Controlled Unitary Demo via QSP with Relaxed Constraints")
 
 
-description = """
+description = r"""
 This demo allows you to generate control sequence for implementing target X-rotations
-on a qubit using detuning as the control parameter. To be specific for a given list of delta_vals
-and alpha_vals, we train a QSP sequence of phases to realize R_x(alpha_i) when delta = delta_i +/- signal_window.
+on a qubit using detuning as the control parameter. For a given list of delta_vals
+and alpha_vals, we train a QSP sequence of phases to realize $R_x(\alpha_i)$ when detuning is near
+$\delta_i$. Specifically, the target is to achieve
 
-Configure all arguments from `qsp_fit_relaxed.py`. Key parameters are
+$R_x(\alpha_i)$ when $\delta = \delta_i \pm \sigma$.
 
-`N`: Number of target gates (or number of peaks in the detuning distribution)\n
-`K`: Maximum phase index (controls the length of the control sequence)\n
-`Delta_0`: Maximum detuning (MHz). Detuning distributions should be within [-Delta_0, Delta_0].\n
-`delta_vals`: List of detuning values (MHz) at which target gates are defined.\n
-`alpha_vals`: List of target rotation angles (in units of pi) corresponding to each delta\n
-`signal_window`: Width of the detuning signal window (MHz). \n
+for some window width $\sigma$ specified by `signal_window` = $\sigma$.
+
+ Key parameters are 
+
+`N`: Number of target gates (or number of peaks in the detuning distribution)
+
+`K`: NUmber of control gates. QSP sequence will generate polynomial $P(x)$ of degree at most $K$.
+
+`Delta_0`: Maximum detuning (2$\pi$ MHz). Detuning distributions should be within $[-\Delta_0, \Delta_0]$.
+
+`delta_vals`: List of detuning values (2$\pi$ MHz) at which target gates are defined.
+
+`alpha_vals`: List of target rotation angles (in units of pi) corresponding to each delta
+
+`signal_window`: Width of the detuning signal window (2$\pi$ MHz).
+
 `build_with_detuning`: Whether to include detuning in the signal operator of QSP. When set to False, we are assuming infinitely fast control.
 """
 
