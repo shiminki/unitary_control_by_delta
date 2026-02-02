@@ -3,4 +3,3 @@ tqdm
 matplotlib
 numpy
 pandas
-streamlit
