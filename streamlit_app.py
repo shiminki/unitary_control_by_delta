@@ -64,14 +64,14 @@ with col1:
     K = st.number_input("K (max phase index)", min_value=1, value=30, step=1)
     N = st.number_input("N (num_peaks = number of gates)", min_value=1, value=4, step=1)
     Delta_0 = st.number_input("Delta_0 (MHz)", min_value=0.0, value=100.0, step=1.0)
-    signal_window = st.number_input("signal_window (MHz)", min_value=0.0, value=10.0, step=0.1)
+    signal_window = st.number_input("signal_window (MHz)", min_value=0.0, value=5.0, step=0.1)
     Omega_max = st.number_input("Omega_max (MHz)", min_value=0.0, value=80.0, step=1.0)
     build_with_detuning = st.checkbox("build_with_detuning", value=False)
     
 
 with col2:
     st.subheader("Other Arguments")
-    steps = st.number_input("training steps", min_value=1, value=5000, step=100)
+    steps = st.number_input("training steps", min_value=1, value=2000, step=100)
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
     lr = st.number_input("lr", min_value=0.0, value=5e-2, step=1e-3, format="%.6f")
     device = st.selectbox("device", options=["cpu", "cuda"], index=0 if default_device == "cpu" else 1)
