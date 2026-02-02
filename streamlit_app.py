@@ -237,7 +237,8 @@ if st.session_state["results"] is not None:
 
     if os.path.exists(results["plot_path"]):
         st.subheader("Matrix Element vs Delta Plot")
-        st.image(results["plot_path"], caption="Matrix element vs delta", use_container_width=True)
+        st.image(results["plot_path"], caption="Matrix element vs delta", use_column_width=True)
+
     else:
         st.info(f"Plot not found at `{results['plot_path']}`")
 
