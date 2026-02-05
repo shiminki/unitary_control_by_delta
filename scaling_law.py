@@ -133,6 +133,7 @@ def main():
     argparser = argparse.ArgumentParser(description="Run scaling law experiments.")
     argparser.add_argument("--out_dir", type=str, default="scaling_law_results", help="Output directory for results.")
     argparser.add_argument("--is_drive", type=str_to_bool, help="Whether to run on Google Drive.", default=False)
+    argparser.add_argument("--small", type=str_to_bool, help="Whether to run a small test case.", default=False)
     args = argparser.parse_args()
     out_dir = "/content/drive/MyDrive/Colab Notebooks/Scaling Law/" if args.is_drive else args.out_dir
 
@@ -140,6 +141,13 @@ def main():
     N_list = [2, 4, 6]
     Delta_0_list = [50, 100, 150]
     sigma_to_Delta_0_list = [0.02, 0.05, 0.1]
+
+    # # Small test case
+    if args.small:
+        K_list = [30, 50]
+        N_list = [2, 4]
+        Delta_0_list = [100]
+        sigma_to_Delta_0_list = [0.05]
     num_trials = 12 if args.is_drive else 8
 
 
@@ -158,11 +166,17 @@ def main():
         K_list, N_list, Delta_0_list, sigma_to_Delta_0_list,
     ):
         for trial in range(num_trials):
-            tasks.append((K, N, Delta_0, sigma_to_Delta_0, trial, out_dir))
+            tasks.append((K, N, Delta_0, sigma_to_Delta_0, trial, os.path.join(out_dir, "data")))
+
+    task = random.shuffle(tasks)
 
     max_workers = max(1, min(os.cpu_count() or 1, len(tasks)))
 
     print(f"Starting scaling law trials with {max_workers} parallel workers...")
+
+    # EMA for per-task duration (seconds)
+    ema = None
+    alpha = 0.10  # smaller = smoother (less jumpy). try 0.05 ~ 0.2
 
     ctx = mp.get_context("spawn")
     with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
