@@ -77,9 +77,9 @@ with col1:
     st.subheader("Core Arguments")
     K = st.number_input("K (max phase index)", min_value=1, value=30, step=1)
     N = st.number_input("N (num_peaks = number of gates)", min_value=1, value=4, step=1)
-    Delta_0 = st.number_input("Delta_0 (MHz)", min_value=0.0, value=100.0, step=1.0)
-    signal_window = st.number_input("signal_window (MHz)", min_value=0.0, value=5.0, step=0.1)
-    Omega_max = st.number_input("Omega_max (MHz)", min_value=0.0, value=80.0, step=1.0)
+    Delta_0_scaled = st.number_input("Delta_0 (MHz)", min_value=0.0, value=100.0, step=1.0)
+    signal_window_scaled = st.number_input("signal_window (MHz)", min_value=0.0, value=5.0, step=0.1)
+    Omega_max_scaled = st.number_input("Omega_max (MHz)", min_value=0.0, value=80.0, step=1.0)
     build_with_detuning = st.checkbox("build_with_detuning", value=False)
     
 
@@ -96,8 +96,8 @@ with col2:
 st.subheader("Target Values")
 alpha_default = "0.3333, 1, 0.5, 1.25"
 delta_default = "-80, -32, 32, 80"
-alpha_raw = st.text_area("alpha_vals (radians unit in pi, length N)", value=alpha_default, height=80)
-delta_raw = st.text_area("delta_vals (MHz, length N)", value=delta_default, height=80)
+alpha_list_scaled = st.text_area("alpha_vals (radians unit in pi, length N)", value=alpha_default, height=80)
+delta_list_scaled = st.text_area("delta_vals (MHz, length N)", value=delta_default, height=80)
 
 run_btn = st.button("Run Training")
 
@@ -105,8 +105,8 @@ if "results" not in st.session_state:
     st.session_state["results"] = None
 
 if run_btn:
-    alpha_list, alpha_err = parse_float_list(alpha_raw)
-    delta_list, delta_err = parse_float_list(delta_raw)
+    alpha_val_scaled, alpha_err = parse_float_list(alpha_list_scaled)
+    delta_val_scaled, delta_err = parse_float_list(delta_list_scaled)
 
     errors = []
     if alpha_err:
@@ -114,10 +114,10 @@ if run_btn:
     if delta_err:
         errors.append(f"delta_vals: {delta_err}")
     if not errors:
-        if len(alpha_list) != N:
-            errors.append(f"alpha_vals length is {len(alpha_list)}, expected N={N}.")
-        if len(delta_list) != N:
-            errors.append(f"delta_vals length is {len(delta_list)}, expected N={N}.")
+        if len(alpha_val_scaled) != N:
+            errors.append(f"alpha_vals length is {len(alpha_val_scaled)}, expected N={N}.")
+        if len(delta_val_scaled) != N:
+            errors.append(f"delta_vals length is {len(delta_val_scaled)}, expected N={N}.")
 
     if errors:
         for e in errors:
@@ -132,9 +132,9 @@ if run_btn:
             device = "cpu"
 
         cfg = TrainConfig(
-            Omega_max=2 * math.pi * Omega_max,
-            Delta_0=2 * math.pi * Delta_0,
-            singal_window=2 * math.pi * signal_window,
+            Omega_max=2 * math.pi * Omega_max_scaled,
+            Delta_0=2 * math.pi * Delta_0_scaled,
+            singal_window=2 * math.pi * signal_window_scaled,
             K=int(K),
             steps=int(steps),
             lr=float(lr),
@@ -144,8 +144,8 @@ if run_btn:
             build_with_detuning=build_with_detuning,
         )
 
-        delta_vals = torch.tensor(delta_list, device=device) * (2 * math.pi)
-        alpha_vals = torch.tensor(alpha_list, device=device) * math.pi
+        delta_vals = torch.tensor(delta_val_scaled, device=device) * (2 * math.pi)
+        alpha_vals = torch.tensor(alpha_val_scaled, device=device) * math.pi
 
         if (delta_vals.abs() > cfg.Delta_0).any():
             st.warning("Some delta_vals exceed |Delta_0| after unit conversion.")
@@ -171,19 +171,17 @@ if run_btn:
             )
 
         tau_us = (math.pi / (4.0 * cfg.Delta_0))
-        omega_2pi_mhz = float(Omega_max)
-        delta_2pi_mhz = float(Delta_0)
         t_rows = []
         hx_rows = []
         hz_rows = []
         for i, phi in enumerate(phi_final.tolist()):
             t_rows.append(np.abs(phi) / cfg.Omega_max)
-            hx_rows.append(omega_2pi_mhz * np.sign(phi))
+            hx_rows.append(Omega_max_scaled * np.sign(phi))
             hz_rows.append(0.0)
             if i != len(phi_final) - 1:
                 t_rows.append(tau_us)
                 hx_rows.append(0.0)
-                hz_rows.append(delta_2pi_mhz)
+                hz_rows.append(Delta_0_scaled)
 
         pulse_df = pd.DataFrame(
             {
@@ -195,11 +193,7 @@ if run_btn:
 
         plot_path = os.path.join(out_dir, f"u00_final_K={int(K)}.png")
         plot_matrix_element_vs_delta(
-            phi_final, cfg.Omega_max, delta_vals / (2 * math.pi), alpha_vals,
-            cfg.Delta_0 / (2 * math.pi), cfg.end_with_W, cfg.device,
-            out_path=plot_path,
-            delta_width=cfg.singal_window / (2 * math.pi),
-            build_with_detuning=cfg.build_with_detuning,
+            phi_final, cfg, delta_vals, alpha_vals, out_path=plot_path
         )
 
         st.session_state["results"] = {
@@ -210,9 +204,9 @@ if run_btn:
                 "K": int(K),
                 "steps": int(steps),
                 "num_peaks": int(N),
-                "Delta_0": float(Delta_0),
-                "signal_window": float(signal_window),
-                "Omega_max": float(Omega_max),
+                "Delta_0": float(Delta_0_scaled),
+                "signal_window": float(signal_window_scaled),
+                "Omega_max": float(Omega_max_scaled),
                 "lr": float(lr),
                 "device": device,
                 "end_with_W": end_with_W,
