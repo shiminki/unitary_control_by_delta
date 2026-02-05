@@ -174,10 +174,6 @@ def main():
 
     print(f"Starting scaling law trials with {max_workers} parallel workers...")
 
-    # EMA for per-task duration (seconds)
-    ema = None
-    alpha = 0.10  # smaller = smoother (less jumpy). try 0.05 ~ 0.2
-
     ctx = mp.get_context("spawn")
     with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
 
