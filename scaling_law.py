@@ -46,7 +46,7 @@ def generate_delta_alpha_pairs(N, Delta_0, signal_window):
 
 
 def _run_single_trial(task):
-    K, N, Delta_0, sigma_to_Delta_0, trial = task
+    K, N, Delta_0, sigma_to_Delta_0, trial, out_dir = task
     signal_window = sigma_to_Delta_0 * Delta_0
     Omega_max = 80  # Fix to 80 MHz
 
@@ -132,15 +132,15 @@ def main():
 
     argparser = argparse.ArgumentParser(description="Run scaling law experiments.")
     argparser.add_argument("--out_dir", type=str, default="scaling_law_results", help="Output directory for results.")
+    argparser.add_argument("--is_drive", action="store_false", help="Whether to run on Google Drive.")
     args = argparser.parse_args()
-    # out_dir = "/content/drive/MyDrive/Colab Notebooks/Scaling Law/"
-    out_dir = args.out_dir
+    out_dir = "/content/drive/MyDrive/Colab Notebooks/Scaling Law/" if args.is_drive else args.out_dir
 
     K_list = [30, 50, 70, 100]
     N_list = [2, 4, 6]
     Delta_0_list = [50, 100, 150]
     sigma_to_Delta_0_list = [0.02, 0.05, 0.1]
-    num_trials = 8
+    num_trials = 12 if args.is_drive else 8
 
 
     fidelity_data = {
@@ -158,7 +158,7 @@ def main():
         K_list, N_list, Delta_0_list, sigma_to_Delta_0_list,
     ):
         for trial in range(num_trials):
-            tasks.append((K, N, Delta_0, sigma_to_Delta_0, trial))
+            tasks.append((K, N, Delta_0, sigma_to_Delta_0, trial, out_dir))
 
     max_workers = max(1, min(os.cpu_count() or 1, len(tasks)))
 
