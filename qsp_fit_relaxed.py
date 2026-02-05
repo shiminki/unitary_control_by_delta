@@ -18,6 +18,47 @@ from tqdm import tqdm
 
 from qsp_fit import (Rz, W, bmm, DirectPhases, str_to_bool, build_U)
 
+
+def fidelity(phi, delta_vals, alpha_vals, cfg) -> float:
+    """
+    Docstring for fidelity
+    
+    :param phi: QSP control angle units of radian
+    :param delta_vals: detuning in the units of radian (2 pi MHz)
+    :param alpha_vals: rotaion angle in the units of radian (pi rad)
+    :param cfg: Description
+    :return: Description
+    :rtype: float
+    """
+    sample_size = 1000
+    # Sample around provided delta_vals within +/- cfg.singal_window.
+    idx = torch.randint(0, delta_vals.numel(), (sample_size,), device=cfg.device)
+    centers = delta_vals[idx]
+    half_window = cfg.singal_window
+    jitter = (2.0 * torch.rand(sample_size, device=cfg.device) - 1.0) * half_window
+    delta_samples = (centers + jitter).clamp(-cfg.Delta_0, cfg.Delta_0)  # (sample_size,)
+    # Assign alpha_samples based on nearest delta_vals for each delta_samples[j]
+    nearest_idx = (delta_samples[:, None] - delta_vals[None, :]).abs().argmin(dim=1)
+    alpha_samples = alpha_vals[nearest_idx]
+
+    if cfg.build_with_detuning:
+        U = build_U_with_detuning(phi, delta=delta_samples, Delta_0=cfg.Delta_0, Omega=cfg.Omega_max, end_with_W=cfg.end_with_W)  # (sample_size, 2, 2)
+    else:
+        theta_range = (math.pi / 4) * (1 + delta_samples / cfg.Delta_0)  # (sample_size,)
+        U = build_U(phi, theta_range.to(cfg.device), end_with_W=cfg.end_with_W)  # (N, 2, 2)
+    # Build target_unitary[i] = diag(e^{-i alpha_i / 2}, e^{+i alpha_i / 2})
+    target_unitary = torch.zeros((sample_size, 2, 2), dtype=torch.complex128, device=cfg.device)
+    target_unitary[:, 0, 0] = torch.exp(-0.5j * alpha_samples.to(torch.complex128))
+    target_unitary[:, 1, 1] = torch.exp(0.5j * alpha_samples.to(torch.complex128))
+
+    # trace(target^\dagger U) for each sample
+    traces = torch.einsum("bii->b", target_unitary.conj().transpose(-2, -1) @ U)
+
+    # Average gate fidelity for d=2: (|trace|^2 + 2) / 6
+    return (((traces.abs() ** 2) + 2.0) / 6.0).mean().item()
+
+
+
 def build_U_with_detuning(
     phi: torch.Tensor,
     delta: torch.Tensor,
@@ -58,14 +99,16 @@ def build_U_with_detuning(
         norm = torch.sqrt(Omega_tensor**2 + delta**2)  # [B,]
 
         lamb = phase / (2 * Omega) * norm  # [B,]
-        diag = Omega_tensor / norm  # [B,]
-        offdiag = delta / norm
+        c = torch.cos(lamb)
+        s = torch.sin(lamb)
+        sin_diag = s * Omega_tensor / norm  # [B,]
+        sin_offdiag = s * delta / norm
 
         rotation = torch.zeros((B, 2, 2), dtype=torch.complex128, device=dev)  # [B,2,2]
-        rotation[:, 0, 0] = torch.cos(lamb) - 1j * diag * torch.sin(lamb)
-        rotation[:, 1, 1] = torch.cos(lamb) + 1j * diag * torch.sin(lamb)
-        rotation[:, 0, 1] = -1j * offdiag * torch.sin(lamb)
-        rotation[:, 1, 0] = -1j * offdiag * torch.sin(lamb)
+        rotation[:, 0, 0] = c - 1j * sin_diag
+        rotation[:, 1, 1] = c + 1j * sin_diag
+        rotation[:, 0, 1] = -1j * sin_offdiag
+        rotation[:, 1, 0] = -1j * sin_offdiag
 
         # simga_x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
         # sigma_z = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)
@@ -197,6 +240,7 @@ def train(
     alpha_vals: torch.Tensor,
     sample_size: int = 1024,
     progress_cb: Optional[Callable[[int, int, float, float], None]] = None,
+    verbose: bool = True,
 ):
     assert delta_vals.shape == alpha_vals.shape, "delta_vals and alpha_vals must have the same shape."
     delta_vals = delta_vals.to(cfg.device)
@@ -221,7 +265,31 @@ def train(
     best_loss = float("inf")
 
     start_t = time.perf_counter()
-    with tqdm(total=cfg.steps, desc="Training", dynamic_ncols=True) as pbar:
+    if verbose:
+        with tqdm(total=cfg.steps, desc="Training", dynamic_ncols=True) as pbar:
+            for step in range(1, cfg.steps + 1):
+                loss, pred, target = train_epoch(
+                    phase_model, opt, sched, cfg,
+                    theta_samples, alpha_samples
+                )
+
+                if loss < best_loss:
+                    best_loss = loss
+                    best_phi = phase_model().detach().cpu().clone()
+
+                pbar.set_postfix({
+                    "step": step,
+                    "train_loss": f"{loss:.3e}"
+                })
+                
+                pbar.update(1)
+                if progress_cb is not None:
+                    elapsed = time.perf_counter() - start_t
+                    rate = elapsed / max(step, 1)
+                    eta = rate * (cfg.steps - step)
+                    progress_cb(step, cfg.steps, loss, eta)
+    
+    else:
         for step in range(1, cfg.steps + 1):
             loss, pred, target = train_epoch(
                 phase_model, opt, sched, cfg,
@@ -231,18 +299,6 @@ def train(
             if loss < best_loss:
                 best_loss = loss
                 best_phi = phase_model().detach().cpu().clone()
-
-            pbar.set_postfix({
-                "step": step,
-                "train_loss": f"{loss:.3e}"
-            })
-            
-            pbar.update(1)
-            if progress_cb is not None:
-                elapsed = time.perf_counter() - start_t
-                rate = elapsed / max(step, 1)
-                eta = rate * (cfg.steps - step)
-                progress_cb(step, cfg.steps, loss, eta)
 
     plot_u00_vs_delta(
         best_phi, cfg.Omega_max, delta_vals, alpha_vals,
@@ -258,29 +314,24 @@ def train(
 
 def plot_matrix_element_vs_delta(
     phi: torch.Tensor,
-    Omega: float,
+    cfg: TrainConfig,
     delta_vals: torch.Tensor,
     alpha_vals: torch.Tensor,
-    Delta_0: float,
-    end_with_W: bool,
-    device: torch.device,
-    out_path: str,
-    delta_width: float,
-    build_with_detuning: bool = False,
+    out_path: str
 ):
     """
     For delta = delta_vals[i] +/- delta_width/2, plot U00 vs delta and
     overlay the target U_target_00 within each segment.
     """
     
-    delta_range = torch.linspace(-Delta_0, Delta_0, steps=1024, device=device)  # (N,)
-    theta_range = (math.pi / 4) * (1 + delta_range / Delta_0)  # (N,)
-    if build_with_detuning:
-        U = build_U_with_detuning(phi, delta_range, Delta_0, Omega, end_with_W=end_with_W)  # (N, 2, 2)
+    delta_range = torch.linspace(-cfg.Delta_0, cfg.Delta_0, steps=1024, device=cfg.device)  # (N,)
+    theta_range = (math.pi / 4) * (1 + delta_range / cfg.Delta_0)  # (N,)
+    if cfg.build_with_detuning:
+        U = build_U_with_detuning(phi, delta_range, cfg.Delta_0, cfg.Omega_max, end_with_W=cfg.end_with_W)  # (N, 2, 2)
     else:
-        U = build_U(phi, theta_range.to(device), end_with_W=end_with_W)  # (N, 2, 2)
+        U = build_U(phi, theta_range.to(cfg.device), end_with_W=cfg.end_with_W)  # (N, 2, 2)
     
-    Hadamard = 1 / math.sqrt(2) * torch.tensor([[1, 1], [1, -1]], dtype=torch.complex128, device=device)
+    Hadamard = 1 / math.sqrt(2) * torch.tensor([[1, 1], [1, -1]], dtype=torch.complex128, device=cfg.device)
     U = Hadamard @ U @ Hadamard  # Change basis to X-basis
     
     u00 = U[:, 0, 0].detach().cpu()  # (N,)
@@ -288,37 +339,35 @@ def plot_matrix_element_vs_delta(
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    ax.plot(delta_range, u00.real, label="Re(u_00)")
-    # ax.plot(delta_range, u00.imag, label="Im(u_00)")
-    # ax.plot(delta_range, u01.real, label="Re(u_01)")
-    ax.plot(delta_range, u01.imag, label="Im(u_01)")
+    ax.plot(delta_range/(2 * math.pi), u00.real, label="Re(u_00)")
+    ax.plot(delta_range/(2 * math.pi), u01.imag, label="Im(u_01)")
 
     for i, delta in enumerate(delta_vals):
         alpha_i = alpha_vals[i]
-        delta_min = delta.item() - delta_width
-        delta_max = delta.item() + delta_width
+        delta_min = delta.item() - cfg.singal_window
+        delta_max = delta.item() + cfg.singal_window
 
         ax.hlines(
             y=np.cos(alpha_i.item() / 2),
-            xmin=delta_min,
-            xmax=delta_max,
+            xmin=delta_min/(2 * math.pi),
+            xmax=delta_max/(2 * math.pi),
             colors="red",
             linestyles="dashed",
             label="Re(target u_00)" if i == 0 else None
         )
         ax.hlines(
             y=-np.sin(alpha_i.item() / 2),
-            xmin=delta_min,
-            xmax=delta_max,
+            xmin=delta_min/(2 * math.pi),
+            xmax=delta_max/(2 * math.pi),
             colors="green",
             linestyles="dashed",
             label="Im(target u_01)" if i == 0 else None
         )
 
-        ax.axvspan(delta_min, delta_max, color="gray", alpha=0.15)
+        ax.axvspan(delta_min/(2 * math.pi), delta_max/(2 * math.pi), color="gray", alpha=0.15)
         label = f"R_x({alpha_i / math.pi:.4f} pi)"
         ax.text(
-            delta.item(),
+            delta.item()/(2 * math.pi),
             1.05,
             label,
             ha="center",
@@ -326,15 +375,21 @@ def plot_matrix_element_vs_delta(
             fontsize=9
         )
 
-    tau = 1/(8 * Delta_0)
+    tau = math.pi/(4 * cfg.Delta_0)
     K = len(phi) - 1
-    T = K * tau + sum(phi.abs()).item() / (Omega)
+    T = K * tau + sum(phi.abs()).item() / (cfg.Omega_max)
 
+    fidelity_val = fidelity(phi, delta_vals, alpha_vals, cfg)
 
     ax.set_xlabel("Detuning δ (MHz)")
-    ax.set_ylabel("u_00 Element")
+    ax.set_ylabel("Matrix Element")
     ax.set_ylim(-1.2, 1.2)
-    ax.set_title(f"Matrix Element vs Target Controlled Rx(alpha)\nRabi: (2pi) {Omega/(2*math.pi):.2f} MHz\nTotal Time T={T:.6f} μs")
+    title_str = (
+        "Matrix Element vs Target Controlled Rx(alpha)\n"
+        f"Rabi: (2pi) {cfg.Omega_max/(2*math.pi):.2f} MHz\n"
+        f"Total Time T={T:.6f} μs\nFidelity: {fidelity_val:.6f}"
+    )
+    ax.set_title(title_str)
     ax.legend(loc="best")
     ax.grid(True, alpha=0.3)
 
