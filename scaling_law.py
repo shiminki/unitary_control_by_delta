@@ -84,7 +84,7 @@ def _run_single_trial(task):
         cfg,
         delta_vals,
         alpha_vals,
-        sample_size=2048,
+        sample_size=1024,
         progress_cb=None,
         verbose=False,
         plot_name=os.path.join(cfg.out_dir, f"{config_tag}.png")
@@ -132,7 +132,7 @@ def main():
 
     argparser = argparse.ArgumentParser(description="Run scaling law experiments.")
     argparser.add_argument("--out_dir", type=str, default="scaling_law_results", help="Output directory for results.")
-    argparser.add_argument("--is_drive", action="store_false", help="Whether to run on Google Drive.")
+    argparser.add_argument("--is_drive", type=str_to_bool, help="Whether to run on Google Drive.", default=False)
     args = argparser.parse_args()
     out_dir = "/content/drive/MyDrive/Colab Notebooks/Scaling Law/" if args.is_drive else args.out_dir
 
