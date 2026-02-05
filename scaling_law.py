@@ -6,9 +6,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import torch
 import pandas as pd
-import json
-
-
+import multiprocessing as mp
+import argparse
 
 
 def generate_delta_alpha_pairs(N, Delta_0, signal_window):
@@ -28,7 +27,7 @@ def generate_delta_alpha_pairs(N, Delta_0, signal_window):
     max_attempts = 1000
 
     while len(delta_list) < N and attempts < max_attempts:
-        candidate = random.uniform(-Delta_0 + signal_window, Delta_0 - signal_window)
+        candidate = random.uniform(-Delta_0 + (N + 1) * signal_window, Delta_0 - (N + 1) * signal_window)
         overlap = False
         for d in delta_list:
             if abs(candidate - d) < 2 * signal_window:
@@ -57,10 +56,10 @@ def _run_single_trial(task):
         singal_window=2 * math.pi * signal_window,
         K=int(K),
         steps=2000,
-        lr=1e-3,
+        lr=7e-2,
         device="cpu",
         end_with_W=False,
-        out_dir="scaling_law_results",
+        out_dir=out_dir,
         build_with_detuning=True,
     )
 
@@ -76,6 +75,7 @@ def _run_single_trial(task):
         {
             "delta (MHz)": delta_list,
             "alpha (pi rad)": alpha_list,
+            "signal_window (MHz)": [signal_window] * N,
         }
     )
     input_df.to_csv(os.path.join(cfg.out_dir, f"{config_tag}_input.csv"), index=False)
@@ -86,7 +86,8 @@ def _run_single_trial(task):
         alpha_vals,
         sample_size=2048,
         progress_cb=None,
-        verbose=False
+        verbose=False,
+        plot_name=os.path.join(cfg.out_dir, f"{config_tag}.png")
     )
 
     tau_us = (math.pi / (4.0 * cfg.Delta_0))
@@ -115,6 +116,8 @@ def _run_single_trial(task):
 
     gate_fidelity = fidelity(phi_final, delta_vals, alpha_vals, cfg)
 
+    print(f"K={K}, Delta_0: {Delta_0} MHz, Delta_vals {delta_list}, Alpha_vals {alpha_list}, signal window {signal_window} => Gate Fidelity: {gate_fidelity:.6f}")
+
     return {
         "K": K,
         "N": N,
@@ -127,11 +130,17 @@ def _run_single_trial(task):
 
 def main():
 
+    argparser = argparse.ArgumentParser(description="Run scaling law experiments.")
+    argparser.add_argument("--out_dir", type=str, default="scaling_law_results", help="Output directory for results.")
+    args = argparser.parse_args()
+    # out_dir = "/content/drive/MyDrive/Colab Notebooks/Scaling Law/"
+    out_dir = args.out_dir
+
     K_list = [30, 50, 70, 100]
     N_list = [2, 4, 6]
     Delta_0_list = [50, 100, 150]
     sigma_to_Delta_0_list = [0.02, 0.05, 0.1]
-    num_trials = 10
+    num_trials = 8
 
 
     fidelity_data = {
@@ -146,7 +155,7 @@ def main():
 
     tasks = []
     for K, N, Delta_0, sigma_to_Delta_0 in itertools.product(
-        K_list, N_list, Delta_0_list, sigma_to_Delta_0_list
+        K_list, N_list, Delta_0_list, sigma_to_Delta_0_list,
     ):
         for trial in range(num_trials):
             tasks.append((K, N, Delta_0, sigma_to_Delta_0, trial))
@@ -155,7 +164,10 @@ def main():
 
     print(f"Starting scaling law trials with {max_workers} parallel workers...")
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    ctx = mp.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+
+    # with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(_run_single_trial, task) for task in tasks]
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Scaling-law trials"):
             result = fut.result()
@@ -167,7 +179,7 @@ def main():
             fidelity_data["Gate Fidelity"].append(result["Gate Fidelity"])
     
     fidelity_df = pd.DataFrame(fidelity_data)
-    fidelity_df.to_csv("scaling_law_fidelity_results.csv", index=False)
+    fidelity_df.to_csv(os.path.join(out_dir,"scaling_law_fidelity_results.csv"), index=False)
 
 
 if __name__ == "__main__":

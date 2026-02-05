@@ -241,6 +241,7 @@ def train(
     sample_size: int = 1024,
     progress_cb: Optional[Callable[[int, int, float, float], None]] = None,
     verbose: bool = True,
+    plot_name: str = None
 ):
     assert delta_vals.shape == alpha_vals.shape, "delta_vals and alpha_vals must have the same shape."
     delta_vals = delta_vals.to(cfg.device)
@@ -300,12 +301,14 @@ def train(
                 best_loss = loss
                 best_phi = phase_model().detach().cpu().clone()
 
-    plot_u00_vs_delta(
-        best_phi, cfg.Omega_max, delta_vals, alpha_vals,
-        cfg.Delta_0, cfg.end_with_W, cfg.device,
-        out_path=os.path.join(cfg.out_dir, f"u00_final_K={cfg.K}_noisy_control_{cfg.build_with_detuning}.png"),
-        delta_width=cfg.singal_window
+    if plot_name is None:
+        plot_name = os.path.join(cfg.out_dir, f"matrix_element_vs_delta_K{cfg.K}_loss_{best_loss:.6f}.png")
+
+    plot_matrix_element_vs_delta(
+        best_phi, cfg, delta_vals, alpha_vals,
+        out_path=plot_name,
     )
+
 
     return best_phi, best_loss
 
@@ -396,89 +399,6 @@ def plot_matrix_element_vs_delta(
     plt.tight_layout()
     plt.savefig(out_path, dpi=160)
     plt.close()
-
-
-def plot_u00_vs_delta(
-    phi: torch.Tensor,
-    Omega: float,
-    delta_vals: torch.Tensor,
-    alpha_vals: torch.Tensor,
-    Delta_0: float,
-    end_with_W: bool,
-    device: torch.device,
-    out_path: str,
-    delta_width: float,
-    build_with_detuning: bool = False,
-):
-    """
-    For delta = delta_vals[i] +/- delta_width/2, plot U00 vs delta and
-    overlay the target U_target_00 within each segment.
-    """
-    
-    delta_range = torch.linspace(-Delta_0, Delta_0, steps=1024, device=device)  # (N,)
-    theta_range = (math.pi / 4) * (1 + delta_range / Delta_0)  # (N,)
-
-    if build_with_detuning:
-        U = build_U_with_detuning(phi, delta_range, Delta_0, Omega, end_with_W=end_with_W)  # (N, 2, 2)
-    else:
-        U = build_U(phi, theta_range.to(device), end_with_W=end_with_W)  # (N, 2, 2)
-    u00 = U[:, 0, 0].detach().cpu()  # (N,)
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    ax.plot(delta_range, u00.real, label="Re(u_00)")
-    ax.plot(delta_range, u00.imag, label="Im(u_00)")
-
-
-    for i, delta in enumerate(delta_vals):
-        alpha_i = alpha_vals[i]
-        delta_min = delta.item() - delta_width / 2
-        delta_max = delta.item() + delta_width / 2
-
-        ax.hlines(
-            y=np.cos(alpha_i.item() / 2),
-            xmin=delta_min,
-            xmax=delta_max,
-            colors="red",
-            linestyles="dashed",
-            label="Re(target u_00)" if i == 0 else None
-        )
-        ax.hlines(
-            y=np.sin(alpha_i.item() / 2),
-            xmin=delta_min,
-            xmax=delta_max,
-            colors="green",
-            linestyles="dashed",
-            label="Im(target u_00)" if i == 0 else None
-        )
-
-        ax.axvspan(delta_min, delta_max, color="gray", alpha=0.15)
-        label = f"R_z({alpha_i / math.pi:.4f} pi)"
-        ax.text(
-            delta.item(),
-            1.05,
-            label,
-            ha="center",
-            va="bottom",
-            fontsize=9
-        )
-
-    tau = math.pi/(4 * Delta_0)
-    K = len(phi) - 1
-    T = K * tau + sum(phi.abs()).item() / (Omega)
-
-
-    ax.set_xlabel("Detuning δ (MHz)")
-    ax.set_ylabel("u_00 Element")
-    ax.set_ylim(-1.2, 1.2)
-    ax.set_title(f"QSP u_00 Element vs Target Controlled Rz(alpha)\nRabi: (2pi) {Omega/(2*math.pi):.2f} MHz\nTotal Time T={T:.6f} μs")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=160)
-    plt.close()
-
 
 
 def main():

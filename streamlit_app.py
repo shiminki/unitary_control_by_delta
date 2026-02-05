@@ -168,6 +168,7 @@ if run_btn:
                 alpha_vals,
                 sample_size=2048,
                 progress_cb=progress_cb,
+                verbose=False
             )
 
         tau_us = (math.pi / (4.0 * cfg.Delta_0))
