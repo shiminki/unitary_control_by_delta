@@ -313,6 +313,12 @@ def train(
     return best_phi, best_loss
 
 
+def get_control_runtime(phi, cfg):
+    tau = math.pi/(4 * cfg.Delta_0)
+    K = len(phi) - 1
+    T = K * tau + sum(phi.abs()).item() / (cfg.Omega_max)
+    return T
+
 # Plot function
 
 def plot_matrix_element_vs_delta(
@@ -378,9 +384,7 @@ def plot_matrix_element_vs_delta(
             fontsize=9
         )
 
-    tau = math.pi/(4 * cfg.Delta_0)
-    K = len(phi) - 1
-    T = K * tau + sum(phi.abs()).item() / (cfg.Omega_max)
+    T = get_control_runtime(phi, cfg)
 
     fidelity_val = fidelity(phi, delta_vals, alpha_vals, cfg)
 
