@@ -75,12 +75,12 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("Core Arguments")
-    K = st.number_input("K (max phase index)", min_value=1, value=30, step=1)
+    K = st.number_input("K (max phase index)", min_value=1, value=100, step=1)
     N = st.number_input("N (num_peaks = number of gates)", min_value=1, value=4, step=1)
     Delta_0_scaled = st.number_input("Delta_0 (MHz)", min_value=0.0, value=100.0, step=1.0)
     signal_window_scaled = st.number_input("signal_window (MHz)", min_value=0.0, value=5.0, step=0.1)
     Omega_max_scaled = st.number_input("Omega_max (MHz)", min_value=0.0, value=80.0, step=1.0)
-    build_with_detuning = st.checkbox("build_with_detuning", value=False)
+    build_with_detuning = st.checkbox("build_with_detuning", value=True)
     
 
 with col2:
@@ -168,6 +168,7 @@ if run_btn:
                 alpha_vals,
                 sample_size=2048,
                 progress_cb=progress_cb,
+                verbose=True
             )
 
         tau_us = (math.pi / (4.0 * cfg.Delta_0))
