@@ -7,7 +7,8 @@ import pandas as pd
 import streamlit as st
 import torch
 
-from qsp_fit_relaxed import TrainConfig, train, plot_matrix_element_vs_delta
+from single_pulse_optimization.qsp_fit_relaxed \
+    import (TrainConfig, train, plot_matrix_element_vs_delta)
 
 
 def parse_float_list(raw: str) -> Tuple[List[float], str]:
@@ -77,8 +78,8 @@ with col1:
     st.subheader("Core Arguments")
     K = st.number_input("K (max phase index)", min_value=1, value=100, step=1)
     N = st.number_input("N (num_peaks = number of gates)", min_value=1, value=4, step=1)
-    Delta_0_scaled = st.number_input("Delta_0 (MHz)", min_value=0.0, value=100.0, step=1.0)
-    signal_window_scaled = st.number_input("signal_window (MHz)", min_value=0.0, value=5.0, step=0.1)
+    Delta_0_scaled = st.number_input("Delta_0 (MHz)", min_value=0.0, value=200.0, step=1.0)
+    signal_window_scaled = st.number_input("signal_window (MHz)", min_value=0.0, value=10.0, step=0.1)
     Omega_max_scaled = st.number_input("Omega_max (MHz)", min_value=0.0, value=80.0, step=1.0)
     build_with_detuning = st.checkbox("build_with_detuning", value=True)
     
@@ -95,7 +96,7 @@ with col2:
 
 st.subheader("Target Values")
 alpha_default = "0.3333, 1, 0.5, 1.25"
-delta_default = "-80, -32, 32, 80"
+delta_default = "-100, -32, 32, 100"
 alpha_list_scaled = st.text_area("alpha_vals (radians unit in pi, length N)", value=alpha_default, height=80)
 delta_list_scaled = st.text_area("delta_vals (MHz, length N)", value=delta_default, height=80)
 
