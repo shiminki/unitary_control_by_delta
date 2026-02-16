@@ -43,7 +43,7 @@ for some window width $\sigma$ specified by `signal_window` = $\sigma$.
 
 `N`: Number of target gates (or number of peaks in the detuning distribution)
 
-`K`: NUmber of control gates. QSP sequence will generate polynomial $P(x)$ of degree at most $K$.
+`K`: Number of control gates. QSP sequence will generate polynomial $P(x)$ of degree at most $K$.
 
 `Delta_0`: Maximum detuning (2$\pi$ MHz). Detuning distributions should be within $[-\Delta_0, \Delta_0]$.
 
@@ -66,8 +66,9 @@ However, the streamlit server will take a while to run (~30 min), and we recomme
 To do so, please follow the instruction below:
 
 1. Clone the repository: `git clone https://github.com/shiminki/unitary_control_by_delta.git`
-2. Install the necessary requirements: `pip install -r requirements.txt`
-3. Run the streamlit app: `streamlit run streamlit_app.py`
+2. Enter the directory: `cd unitary_control_by_delta`
+3. Install the necessary requirements: `pip install -r requirements.txt`
+4. Run the streamlit app: `streamlit run streamlit_app.py`
 """
 
 st.markdown(disclaimer)
