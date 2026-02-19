@@ -4,3 +4,5 @@ matplotlib
 numpy
 pandas
 qutip
+pwlf
+streamlit
