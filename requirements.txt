@@ -6,3 +6,4 @@ pandas
 qutip
 pwlf
 streamlit
+altair<5

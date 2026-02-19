@@ -316,25 +316,19 @@ def _qsp_simulate_bloch(phi: torch.Tensor, delta_val: float,
     norm = math.sqrt(Omega ** 2 + delta_val ** 2)
 
 
-    # Iterate phi in reverse so the simulation applies phi[K] first and phi[0] last,
-    # consistent with build_U with swapped axis: U = Rx(phi[0]) H W H … H W H Rx(phi[K]) applies Rz(phi[K])
-    # first when acting on a ket.
-    for j, pv in enumerate(reversed(phi.tolist())):
-        # Rz step with detuning: H = ½(Ω σ_z + δ σ_x), t = pv/Ω
+    # Iterate phi in forward order: phi[0] is applied first to psi_init, phi[K] last.
+    # Sequence: R_x(phi[K];δ) R_z(θ) ... R_z(θ) R_x(phi[0];δ) |psi_init>
+    # R_x(phi; δ) = exp(-i/2 · (Ω σ_x + δ σ_z) · t),  t = phi/Ω
+    for j, pv in enumerate(phi.tolist()):
         lamb = pv * norm / (2.0 * Omega)
         c, s = math.cos(lamb), math.sin(lamb)
-        off = complex(0.0, -s * delta_val / norm)
 
+        # exp(-i/2·(Ω σ_x + δ σ_z)·t) with lamb = norm·t/2
         U_rx = torch.zeros((2, 2), dtype=torch.complex128)
-        U_rx[0, 0] = c
-        U_rx[0, 1] = -1j * s * Omega / norm
-        U_rx[1, 0] = -1j * s * Omega / norm
-        U_rx[1, 1] = c
-        # U_rz = torch.zeros((2, 2), dtype=torch.complex128)
-        # U_rz[0, 0] = complex(c, -s * Omega / norm)
-        # U_rz[1, 1] = complex(c, +s * Omega / norm)
-        # U_rz[0, 1] = off
-        # U_rz[1, 0] = off
+        U_rx[0, 0] = complex(c, -s * delta_val / norm)
+        U_rx[0, 1] = complex(0.0, -s * Omega / norm)
+        U_rx[1, 0] = complex(0.0, -s * Omega / norm)
+        U_rx[1, 1] = complex(c, +s * delta_val / norm)
         psi = U_rx @ psi
         bloch_vecs.append(_spinor_to_bloch(psi))
         # Pass rotation angle |pv| (not physical time); animate_multi_error_bloch
