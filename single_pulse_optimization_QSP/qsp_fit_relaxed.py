@@ -19,10 +19,12 @@ from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 
-from single_pulse_optimization.qsp_fit \
+from single_pulse_optimization_QSP.qsp_fit \
     import (Rz, W, bmm, DirectPhases, str_to_bool, build_U)
 
 __all__ = ["TrainConfig", "train", "fidelity", "plot_matrix_element_vs_delta", "get_control_runtime"]
+
+
 
 def fidelity(phi, delta_vals, alpha_vals, cfg) -> float:
     """
