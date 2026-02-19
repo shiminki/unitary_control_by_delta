@@ -55,7 +55,7 @@ def _make_cache_key(
     K: int,
     Delta_0_MHz: float,
     Omega_max_MHz: float,
-    signal_window_MHz: float,
+    robustness_window_MHz: float,
     build_with_detuning: bool,
     end_with_W: bool,
 ) -> str:
@@ -67,7 +67,7 @@ def _make_cache_key(
             "K": int(K),
             "Delta_0_MHz": round(Delta_0_MHz, 6),
             "Omega_max_MHz": round(Omega_max_MHz, 6),
-            "signal_window_MHz": round(signal_window_MHz, 6),
+            "robustness_window_MHz": round(robustness_window_MHz, 6),
             "build_with_detuning": bool(build_with_detuning),
             "end_with_W": bool(end_with_W),
         },
@@ -436,7 +436,7 @@ $\delta_i$. Specifically, the target is to achieve
 
 $R_x(\alpha_i)$ when $\delta = \delta_i \pm \sigma$.
 
-for some window width $\sigma$ specified by `signal_window` = $\sigma$.
+for some window width $\sigma$ specified by `robustness_window` = $\sigma$.
 
  Key parameters are
 
@@ -450,7 +450,7 @@ for some window width $\sigma$ specified by `signal_window` = $\sigma$.
 
 `alpha_vals`: List of target rotation angles (in units of pi) corresponding to each delta
 
-`signal_window`: Width of the detuning signal window (2$\pi$ MHz).
+`robustness_window`: Width of the detuning signal window (2$\pi$ MHz).
 
 `build_with_detuning`: Whether to include detuning in the signal operator of QSP. When set to False, we are assuming infinitely fast control.
 """
@@ -477,7 +477,7 @@ with col1:
     K = st.number_input("K (max phase index)", min_value=1, value=70, step=1)
     N = st.number_input("N (num_peaks = number of gates)", min_value=1, value=4, step=1)
     Delta_0_scaled = st.number_input("Delta_0 (MHz)", min_value=0.0, value=200.0, step=1.0)
-    signal_window_scaled = st.number_input("signal_window (MHz)", min_value=0.0, value=10.0, step=0.1)
+    robustness_window_scaled = st.number_input("robustness_window (MHz)", min_value=0.0, value=10.0, step=0.1)
     Omega_max_scaled = st.number_input("Omega_max (MHz)", min_value=0.0, value=80.0, step=1.0)
     build_with_detuning = st.checkbox("build_with_detuning", value=True)
 
@@ -494,7 +494,7 @@ with col2:
         "cache_dir (leave blank to disable caching)",
         value="phase_cache",
         help="Directory where trained phases are cached as CSV files. "
-             "Keyed by (delta_vals, alpha_vals, K, Omega_max, Delta_0, signal_window, "
+             "Keyed by (delta_vals, alpha_vals, K, Omega_max, Delta_0, robustness_window, "
              "build_with_detuning, end_with_W). Leave blank to always retrain.",
     )
 
@@ -546,7 +546,7 @@ if run_btn:
         cfg = TrainConfig(
             Omega_max=2 * math.pi * Omega_max_scaled,
             Delta_0=2 * math.pi * Delta_0_scaled,
-            singal_window=2 * math.pi * signal_window_scaled,
+            singal_window=2 * math.pi * robustness_window_scaled,
             K=int(K),
             steps=int(steps),
             lr=float(lr),
@@ -567,7 +567,7 @@ if run_btn:
         _cache_key = _make_cache_key(
             delta_val_scaled, alpha_val_scaled,
             int(K), float(Delta_0_scaled), float(Omega_max_scaled),
-            float(signal_window_scaled), build_with_detuning, end_with_W,
+            float(robustness_window_scaled), build_with_detuning, end_with_W,
         )
         _cached_phi, _cached_loss = (
             _load_phase_cache(cache_dir.strip(), _cache_key)
@@ -647,7 +647,7 @@ if run_btn:
                 "steps": int(steps),
                 "num_peaks": int(N),
                 "Delta_0": float(Delta_0_scaled),
-                "signal_window": float(signal_window_scaled),
+                "robustness_window": float(robustness_window_scaled),
                 "Omega_max": float(Omega_max_scaled),
                 "lr": float(lr),
                 "device": device,
