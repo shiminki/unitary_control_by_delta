@@ -1,5 +1,5 @@
-from single_pulse_optimization.qsp_fit_relaxed import *
-from single_pulse_optimization.qsp_fit import (Rz, W, bmm, DirectPhases, str_to_bool, build_U)
+from single_pulse_optimization_QSP.qsp_fit_relaxed import *
+from single_pulse_optimization_QSP.qsp_fit import (Rz, W, bmm, DirectPhases, str_to_bool, build_U)
 
 import itertools
 import random
@@ -150,7 +150,7 @@ def main():
     argparser.add_argument("--small", type=str_to_bool, help="Whether to run a small test case.", default=False)
     args = argparser.parse_args()
     out_dir = "/content/drive/MyDrive/Colab Notebooks/Scaling Law/" if args.is_drive else args.out_dir
-    out_dir = os.path.join(out_dir, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    # out_dir = os.path.join(out_dir, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     Omega_max_list = [20, 40, 80]  # MHz
     K_list = [30, 50, 70, 100]

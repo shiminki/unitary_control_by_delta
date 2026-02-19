@@ -3,3 +3,7 @@ tqdm
 matplotlib
 numpy
 pandas
+qutip
+pwlf
+streamlit
+altair<5
