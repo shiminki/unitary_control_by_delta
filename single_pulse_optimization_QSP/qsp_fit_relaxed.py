@@ -48,11 +48,8 @@ def fidelity(phi, delta_vals, alpha_vals, cfg) -> float:
     nearest_idx = (delta_samples[:, None] - delta_vals[None, :]).abs().argmin(dim=1)
     alpha_samples = alpha_vals[nearest_idx]
 
-    if cfg.build_with_detuning:
-        U = build_U_with_detuning(phi, delta=delta_samples, Delta_0=cfg.Delta_0, Omega=cfg.Omega_max, end_with_W=cfg.end_with_W)  # (sample_size, 2, 2)
-    else:
-        theta_range = (math.pi / 4) * (1 + delta_samples / cfg.Delta_0)  # (sample_size,)
-        U = build_U(phi, theta_range.to(cfg.device), end_with_W=cfg.end_with_W)  # (N, 2, 2)
+    U = build_U_with_detuning(phi, delta=delta_samples, Delta_0=cfg.Delta_0, Omega=cfg.Omega_max, end_with_W=cfg.end_with_W)  # (sample_size, 2, 2)
+
     # Build target_unitary[i] = diag(e^{-i alpha_i / 2}, e^{+i alpha_i / 2})
     target_unitary = torch.zeros((sample_size, 2, 2), dtype=torch.complex128, device=cfg.device)
     target_unitary[:, 0, 0] = torch.exp(-0.5j * alpha_samples.to(torch.complex128))
@@ -64,6 +61,12 @@ def fidelity(phi, delta_vals, alpha_vals, cfg) -> float:
     # Average gate fidelity for d=2: (|trace|^2 + 2) / 6
     return (((traces.abs() ** 2) + 2.0) / 6.0).mean().item()
 
+
+def theta_to_delta(theta_tensor: torch.Tensor, Delta_0: float):
+    return (2 / math.pi * theta_tensor - 1) * Delta_0
+
+def delta_to_theta(delta_tensor: torch.Tensor, Delta_0: float):
+    return math.pi / 2 * (1 + delta_tensor / Delta_0)
 
 
 def build_U_with_detuning(
@@ -85,7 +88,10 @@ def build_U_with_detuning(
       U = Rz(phi0) W Rz(phi1) W ... W Rz(phiK) W ... W Rz(phi0) W
     """
     assert phi.ndim == 1, "phi must be shape [K+1]"
-    theta = (math.pi / 4) * (1 + delta / Delta_0)
+    # Here, we are using the convention of P[cos\theta]
+    # rather than P[cos\theta/2]
+    # theta = (math.pi / 2) * (1 + delta / Delta_0)
+    theta = delta_to_theta(delta, Delta_0)
     K = phi.shape[0] - 1
     B = theta.shape[0]
     dev = theta.device
@@ -177,7 +183,7 @@ def loss_fn(
     :param phi: phases of the QSP protocol
     :type phi: torch.Tensor
     :param theta_vals: Corresponding theta values of the given detunings.
-        define theta = pi/4 * (1 + delta / Delta_0)
+        define theta = pi/2 * (1 + delta / Delta_0)
     :type theta_vals: torch.Tensor
     :param alpha_vals: Rotation angles, where when delta = delta_i, the resulting
         unitary should approximate Rz(alpha_i).
@@ -191,10 +197,9 @@ def loss_fn(
     """
     # Ensure theta_vals is a leaf with grad tracking for d(pred)/d(theta)
     theta_vals = theta_vals.detach().clone().requires_grad_(True)
-    if build_with_detuning:
-        U = build_U_with_detuning(phi, delta=(4 * theta_vals / math.pi - 1) * Delta_0, Delta_0=Delta_0, Omega=Omega_max, end_with_W=end_with_W)  # (N, 2, 2)
-    else:
-        U = build_U(phi, theta_vals, end_with_W=end_with_W)  # (N, 2, 2)
+
+    U = build_U_with_detuning(phi, delta=theta_to_delta(theta_vals, Delta_0), Delta_0=Delta_0, Omega=Omega_max, end_with_W=end_with_W)  # (N, 2, 2)
+ 
     pred = U[:, 0, 0]  # (N,) u_00 element
     target = torch.cos(alpha_vals / 2) - 1j * torch.sin(alpha_vals / 2)  # (N,)
 
@@ -259,7 +264,7 @@ def train(
     half_window = cfg.singal_window
     jitter = (2.0 * torch.rand(sample_size, device=cfg.device) - 1.0) * half_window
     delta_samples = (centers + jitter).clamp(-cfg.Delta_0, cfg.Delta_0)  # (M,)
-    theta_samples = (math.pi / 4) * (1 + delta_samples / cfg.Delta_0)  # (M,)
+    theta_samples = delta_to_theta(delta_samples, cfg.Delta_0)  # (M,)
     # Assign alpha_samples based on nearest delta_vals for each delta_samples[j]
     nearest_idx = (delta_samples[:, None] - delta_vals[None, :]).abs().argmin(dim=1)
     alpha_samples = alpha_vals[nearest_idx]
@@ -321,7 +326,7 @@ def train(
 
 
 def get_control_runtime(phi, cfg):
-    tau = math.pi/(4 * cfg.Delta_0)
+    tau = math.pi/(2 * cfg.Delta_0)
     K = len(phi) - 1
     T = K * tau + sum(phi.abs()).item() / (cfg.Omega_max)
     return T
@@ -341,11 +346,8 @@ def plot_matrix_element_vs_delta(
     """
     
     delta_range = torch.linspace(-cfg.Delta_0, cfg.Delta_0, steps=1024, device=cfg.device)  # (N,)
-    theta_range = (math.pi / 4) * (1 + delta_range / cfg.Delta_0)  # (N,)
-    if cfg.build_with_detuning:
-        U = build_U_with_detuning(phi, delta_range, cfg.Delta_0, cfg.Omega_max, end_with_W=cfg.end_with_W)  # (N, 2, 2)
-    else:
-        U = build_U(phi, theta_range.to(cfg.device), end_with_W=cfg.end_with_W)  # (N, 2, 2)
+
+    U = build_U_with_detuning(phi, delta_range, cfg.Delta_0, cfg.Omega_max, end_with_W=cfg.end_with_W)  # (N, 2, 2)
     
     Hadamard = 1 / math.sqrt(2) * torch.tensor([[1, 1], [1, -1]], dtype=torch.complex128, device=cfg.device)
     U = Hadamard @ U @ Hadamard  # Change basis to X-basis

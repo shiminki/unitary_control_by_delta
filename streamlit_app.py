@@ -16,7 +16,9 @@ from single_pulse_optimization_QSP.qsp_fit_relaxed import (
     TrainConfig, train, plot_matrix_element_vs_delta,
 )
 from single_pulse_optimization_QSP.qsp_fit import build_U
-from single_pulse_optimization_QSP.qsp_fit_relaxed import build_U_with_detuning
+from single_pulse_optimization_QSP.qsp_fit_relaxed import (
+    build_U_with_detuning, delta_to_theta, theta_to_delta
+)
 
 from util import get_ore_ple_error_distribution, plot_pulse_param
 
@@ -129,14 +131,12 @@ def _qsp_unitary_batch(phi: torch.Tensor, delta_batch: torch.Tensor,
     """Return (B,2,2) unitary for a batch of detuning values."""
     phi_cpu = phi.cpu()
     d_cpu = delta_batch.cpu()
-    if cfg.build_with_detuning:
-        U =  build_U_with_detuning(
-            phi_cpu, d_cpu, cfg.Delta_0,
-            cfg.Omega_max * omega_scale, end_with_W=cfg.end_with_W,
-        )
-    else:
-        theta = (math.pi / 4) * (1 + d_cpu / cfg.Delta_0)
-        U = build_U(phi_cpu, theta, end_with_W=cfg.end_with_W)
+
+    U =  build_U_with_detuning(
+        phi_cpu, d_cpu, cfg.Delta_0,
+        cfg.Omega_max * omega_scale, end_with_W=cfg.end_with_W,
+    )
+    
     H = torch.tensor([[1, 1], [1, -1]], dtype=torch.complex128) / math.sqrt(2)
     return H @ U.to(cfg.device) @ H
 
@@ -303,7 +303,7 @@ def _qsp_simulate_bloch(phi: torch.Tensor, delta_val: float,
     bloch_vecs = [_spinor_to_bloch(psi)]
     pulse_info = []
 
-    theta_val = (math.pi / 4) * (1.0 + delta_val / cfg.Delta_0)
+    theta_val = delta_to_theta(delta_val, cfg.Delta_0)
     H = torch.tensor([[1.0, 1.0], [1.0, -1.0]], dtype=torch.complex128) / math.sqrt(2.0)
 
     W_mat = _W(torch.tensor([theta_val], dtype=torch.float64))[0].to(torch.complex128)
@@ -611,7 +611,7 @@ if run_btn:
                 st.info(f"Phases saved to cache: `{_saved_path}` (key: `{_cache_key}`).")
 
         # Build pulse schedule DataFrame
-        tau_us = math.pi / (4.0 * cfg.Delta_0)
+        tau_us = math.pi / (2 * cfg.Delta_0)
         t_rows, hx_rows, hz_rows = [], [], []
         for i, phi in enumerate(phi_final.tolist()):
             t_rows.append(np.abs(phi) / cfg.Omega_max)
