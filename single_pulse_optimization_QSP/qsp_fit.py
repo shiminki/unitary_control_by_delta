@@ -70,15 +70,15 @@ def Rz(phi: torch.Tensor) -> torch.Tensor:
 
 def W(theta: torch.Tensor) -> torch.Tensor:
     """
-    W(theta) = [[cos(theta),  i sin(theta)],
-                [-i sin(theta), cos(theta)]]
+    W(theta) = [[cos(theta/2),  i sin(theta/2)],
+                [-i sin(theta/2), cos(theta/2)]]
 
     theta: shape [B] (real)
     returns: shape [B,2,2] complex
     """
     theta = theta.to(dtype=torch.float64)
-    c = torch.cos(theta)
-    s = torch.sin(theta)
+    c = torch.cos(theta / 2)
+    s = torch.sin(theta / 2)
     out = torch.zeros((theta.shape[0], 2, 2), dtype=torch.complex128, device=theta.device)
     out[:, 0, 0] = c
     out[:, 1, 1] = c

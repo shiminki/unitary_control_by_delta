@@ -14,9 +14,9 @@ import torch
 
 from single_pulse_optimization_QSP.qsp_fit_relaxed import (
     TrainConfig, train, plot_matrix_element_vs_delta,
+    build_qsp_unitary, delta_to_theta, theta_to_delta,
+    signal_operator, get_wait_time
 )
-from single_pulse_optimization_QSP.qsp_fit import build_U
-from single_pulse_optimization_QSP.qsp_fit_relaxed import build_U_with_detuning
 
 from util import get_ore_ple_error_distribution, plot_pulse_param
 
@@ -56,8 +56,6 @@ def _make_cache_key(
     Delta_0_MHz: float,
     Omega_max_MHz: float,
     robustness_window_MHz: float,
-    build_with_detuning: bool,
-    end_with_W: bool,
 ) -> str:
     """SHA-256 (first 16 hex chars) over the canonical JSON of all cache-relevant params."""
     payload = json.dumps(
@@ -68,8 +66,6 @@ def _make_cache_key(
             "Delta_0_MHz": round(Delta_0_MHz, 6),
             "Omega_max_MHz": round(Omega_max_MHz, 6),
             "robustness_window_MHz": round(robustness_window_MHz, 6),
-            "build_with_detuning": bool(build_with_detuning),
-            "end_with_W": bool(end_with_W),
         },
         sort_keys=True,
     )
@@ -129,14 +125,12 @@ def _qsp_unitary_batch(phi: torch.Tensor, delta_batch: torch.Tensor,
     """Return (B,2,2) unitary for a batch of detuning values."""
     phi_cpu = phi.cpu()
     d_cpu = delta_batch.cpu()
-    if cfg.build_with_detuning:
-        U =  build_U_with_detuning(
-            phi_cpu, d_cpu, cfg.Delta_0,
-            cfg.Omega_max * omega_scale, end_with_W=cfg.end_with_W,
-        )
-    else:
-        theta = (math.pi / 4) * (1 + d_cpu / cfg.Delta_0)
-        U = build_U(phi_cpu, theta, end_with_W=cfg.end_with_W)
+
+    U = build_qsp_unitary(
+        phi_cpu, d_cpu, cfg.Delta_0,
+        cfg.Omega_max * omega_scale,
+    )
+
     H = torch.tensor([[1, 1], [1, -1]], dtype=torch.complex128) / math.sqrt(2)
     return H @ U.to(cfg.device) @ H
 
@@ -163,7 +157,7 @@ def _gate_fidelity_batch(phi: torch.Tensor, delta_batch: torch.Tensor,
 
 # 1. plot_pulse_param  ──────────────────────────────────────────────────────────
 #    Directly callable from util.py with the existing pulse_df.
-#    Called as:  plot_pulse_param(out_dir, title, pulse_df, Omega_max_scaled)
+#    Called as:  plot_pulse_param(out_dir, title, pulse_df, Omega_max_mhz)
 
 
 # 2. fidelity_contour_plot  ────────────────────────────────────────────────────
@@ -180,7 +174,7 @@ def qsp_fidelity_contour_plot(phi: torch.Tensor, cfg: TrainConfig,
         epsilon range: [-0.1, 0.1]  (±10% Omega_max calibration error)
     Title includes average gate fidelity across all peaks at ε = 0.
     """
-    sigma = cfg.singal_window
+    sigma = cfg.robustness_window
     d_lo = max(-cfg.Delta_0, delta_i - sigma)
     d_hi = min(cfg.Delta_0, delta_i + sigma)
     delta_range = torch.linspace(d_lo, d_hi, N_delta, dtype=torch.float64)
@@ -297,20 +291,18 @@ def _qsp_simulate_bloch(phi: torch.Tensor, delta_val: float,
         pulse_info : list of (0, phi_or_0, tau) tuples compatible with
                      animate_multi_error_bloch (phase_only=True)
     """
-    from single_pulse_optimization_QSP.qsp_fit import W as _W
-
     psi = torch.tensor([1.0, 0.0], dtype=torch.complex128)
     bloch_vecs = [_spinor_to_bloch(psi)]
     pulse_info = []
 
-    theta_val = (math.pi / 4) * (1.0 + delta_val / cfg.Delta_0)
+    theta_val = delta_to_theta(delta_val, cfg.Delta_0)
     H = torch.tensor([[1.0, 1.0], [1.0, -1.0]], dtype=torch.complex128) / math.sqrt(2.0)
 
-    W_mat = _W(torch.tensor([theta_val], dtype=torch.float64))[0].to(torch.complex128)
+    W_mat = signal_operator(torch.tensor([theta_val], dtype=torch.float64))[0].to(torch.complex128)
 
     W_mat = H @ W_mat @ H
 
-    tau_W = math.pi / (4.0 * cfg.Delta_0)
+    tau_W = get_wait_time(cfg.Delta_0)
 
     Omega = cfg.Omega_max
     norm = math.sqrt(Omega ** 2 + delta_val ** 2)
@@ -350,7 +342,7 @@ def qsp_bloch_animation(phi: torch.Tensor, cfg: TrainConfig,
     """
     Bloch-sphere animation for 3×N qubits, one triplet per target peak:
         δᵢ − σ,  δᵢ,  δᵢ + σ
-    where σ = cfg.singal_window.  Uses animate_multi_error_bloch from util.py.
+    where σ = cfg.robustness_window.  Uses animate_multi_error_bloch from util.py.
     Returns (out_path, error_message).
     """
     if not _HAS_QUTIP:
@@ -359,7 +351,7 @@ def qsp_bloch_animation(phi: torch.Tensor, cfg: TrainConfig,
             "Run `pip install qutip` to enable this feature."
         )
 
-    sigma = cfg.singal_window  # signal window in rad/s
+    sigma = cfg.robustness_window  # signal window in rad/s
     dv_cpu = delta_vals.cpu()
     av_cpu = alpha_vals.cpu()
 
@@ -451,15 +443,13 @@ for some window width $\sigma$ specified by `robustness_window` = $\sigma$.
 `alpha_vals`: List of target rotation angles (in units of pi) corresponding to each delta
 
 `robustness_window`: Width of the detuning signal window (2$\pi$ MHz).
-
-`build_with_detuning`: Whether to include detuning in the signal operator of QSP. When set to False, we are assuming infinitely fast control.
 """
 st.markdown(description)
 
 st.subheader("Disclaimer and Setup Instructions")
 
 disclaimer = """
-With `build_with_detuning` enabled, a reasonable `K` should be around 70.
+A reasonable `K` should be around 70.
 However, the streamlit server will take a while to run (~30 min), and we recommend to run this demo locally (~10 min).
 To do so, please follow the instruction below:
 
@@ -476,26 +466,24 @@ with col1:
     st.subheader("Core Arguments")
     K = st.number_input("K (max phase index)", min_value=1, value=70, step=1)
     N = st.number_input("N (num_peaks = number of gates)", min_value=1, value=4, step=1)
-    Delta_0_scaled = st.number_input("Delta_0 (MHz)", min_value=0.0, value=200.0, step=1.0)
-    robustness_window_scaled = st.number_input("robustness_window (MHz)", min_value=0.0, value=10.0, step=0.1)
-    Omega_max_scaled = st.number_input("Omega_max (MHz)", min_value=0.0, value=80.0, step=1.0)
-    build_with_detuning = st.checkbox("build_with_detuning", value=True)
+    Delta_0_mhz = st.number_input("Delta_0 (MHz)", min_value=0.0, value=200.0, step=1.0)
+    robustness_window_mhz = st.number_input("robustness_window (MHz)", min_value=0.0, value=10.0, step=0.1)
+    Omega_max_mhz = st.number_input("Omega_max (MHz)", min_value=0.0, value=80.0, step=1.0)
 
 
 with col2:
     st.subheader("Other Arguments")
-    steps = st.number_input("training steps", min_value=1, value=2000, step=100)
+    steps = st.number_input("training steps", min_value=1, value=8000, step=100)
     default_device = "cuda" if torch.cuda.is_available() else "cpu"
     lr = st.number_input("lr", min_value=0.0, value=5e-2, step=1e-3, format="%.6f")
     device = st.selectbox("device", options=["cpu", "cuda"], index=0 if default_device == "cpu" else 1)
-    end_with_W = st.checkbox("end_with_W", value=False)
     out_dir = st.text_input("out_dir", value="plots_relaxed")
     cache_dir = st.text_input(
         "cache_dir (leave blank to disable caching)",
         value="phase_cache",
         help="Directory where trained phases are cached as CSV files. "
-             "Keyed by (delta_vals, alpha_vals, K, Omega_max, Delta_0, robustness_window, "
-             "build_with_detuning, end_with_W). Leave blank to always retrain.",
+             "Keyed by (delta_vals, alpha_vals, K, Omega_max, Delta_0, robustness_window). "
+             "Leave blank to always retrain.",
     )
 
 
@@ -544,16 +532,14 @@ if run_btn:
             device = "cpu"
 
         cfg = TrainConfig(
-            Omega_max=2 * math.pi * Omega_max_scaled,
-            Delta_0=2 * math.pi * Delta_0_scaled,
-            singal_window=2 * math.pi * robustness_window_scaled,
+            Omega_max=2 * math.pi * Omega_max_mhz,
+            Delta_0=2 * math.pi * Delta_0_mhz,
+            robustness_window=2 * math.pi * robustness_window_mhz,
             K=int(K),
             steps=int(steps),
             lr=float(lr),
             device=device,
-            end_with_W=end_with_W,
             out_dir=out_dir,
-            build_with_detuning=build_with_detuning,
         )
 
         delta_vals = torch.tensor(delta_val_scaled, device=device) * (2 * math.pi)
@@ -566,8 +552,8 @@ if run_btn:
         _use_cache = bool(cache_dir.strip())
         _cache_key = _make_cache_key(
             delta_val_scaled, alpha_val_scaled,
-            int(K), float(Delta_0_scaled), float(Omega_max_scaled),
-            float(robustness_window_scaled), build_with_detuning, end_with_W,
+            int(K), float(Delta_0_mhz), float(Omega_max_mhz),
+            float(robustness_window_mhz),
         )
         _cached_phi, _cached_loss = (
             _load_phase_cache(cache_dir.strip(), _cache_key)
@@ -595,7 +581,7 @@ if run_btn:
                         f"Step {step}/{total} — loss {loss:.3e} — ETA {eta_min:02d}:{eta_sec:02d}"
                     )
 
-                phi_final, final_loss = train(
+                phi_final, final_loss, _ = train(
                     cfg,
                     delta_vals,
                     alpha_vals,
@@ -611,16 +597,16 @@ if run_btn:
                 st.info(f"Phases saved to cache: `{_saved_path}` (key: `{_cache_key}`).")
 
         # Build pulse schedule DataFrame
-        tau_us = math.pi / (4.0 * cfg.Delta_0)
+        tau_us = get_wait_time(cfg.Delta_0)
         t_rows, hx_rows, hz_rows = [], [], []
         for i, phi in enumerate(phi_final.tolist()):
             t_rows.append(np.abs(phi) / cfg.Omega_max)
-            hx_rows.append(Omega_max_scaled * np.sign(phi))
+            hx_rows.append(Omega_max_mhz * np.sign(phi))
             hz_rows.append(0.0)
             if i != len(phi_final) - 1:
                 t_rows.append(tau_us)
                 hx_rows.append(0.0)
-                hz_rows.append(Delta_0_scaled)
+                hz_rows.append(Delta_0_mhz)
 
         pulse_df = pd.DataFrame({
             "t (us)": t_rows,
@@ -646,14 +632,12 @@ if run_btn:
                 "K": int(K),
                 "steps": int(steps),
                 "num_peaks": int(N),
-                "Delta_0": float(Delta_0_scaled),
-                "robustness_window": float(robustness_window_scaled),
-                "Omega_max": float(Omega_max_scaled),
+                "Delta_0": float(Delta_0_mhz),
+                "robustness_window": float(robustness_window_mhz),
+                "Omega_max": float(Omega_max_mhz),
                 "lr": float(lr),
                 "device": device,
-                "end_with_W": end_with_W,
                 "out_dir": out_dir,
-                "build_with_detuning": build_with_detuning,
             },
         }
         # Clear cached visualizations when new training runs
@@ -799,7 +783,7 @@ if st.session_state["results"] is not None:
     with tab_bloch:
         st.subheader("Ensemble Bloch Sphere Animation")
         N_peaks = len(delta_vals_cpu)
-        sigma_MHz = cfg_stored.singal_window / (2 * math.pi)
+        sigma_MHz = cfg_stored.robustness_window / (2 * math.pi)
         st.markdown(
             f"Qubit-state trajectories for **{3 * N_peaks} qubits** "
             f"({N_peaks} peaks × 3): one triplet per target peak at "
