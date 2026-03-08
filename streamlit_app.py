@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 import torch
 
-from single_pulse_optimization_QSP.qsp_fit_relaxed import (
+from single_pulse_optimization_QSP.qsp_fit_x_rotation import (
     TrainConfig, train, plot_matrix_element_vs_delta,
     build_qsp_unitary, delta_to_theta, theta_to_delta,
     signal_operator, get_wait_time
