@@ -1,5 +1,4 @@
-from single_pulse_optimization_QSP.qsp_fit_relaxed import *
-from single_pulse_optimization_QSP.qsp_fit import (Rz, W, bmm, DirectPhases, str_to_bool, build_U)
+from single_pulse_optimization_QSP.qsp_fit_x_rotation import *
 
 import itertools
 import random
@@ -46,24 +45,18 @@ def generate_delta_alpha_pairs(N, Delta_0, signal_window, random_delta=True):
 
 
 def _run_single_trial(task):
-    Omega_max, K, trial = task
+    Omega_max, K, trial, out_dir = task
 
     # Parameters based on hBN sample
-    Delta_0 = 200.0  # (2pi) MHz
-    signal_window = 10.0  # (2pi) MHz
-
+    Delta_0_mhz = 200.0  # MHz
+    robustness_window_mhz = 10.0  # MHz
 
     cfg = TrainConfig(
         Omega_max=2 * math.pi * Omega_max,
-        Delta_0=2 * math.pi * Delta_0,
-        singal_window=2 * math.pi * signal_window,
+        Delta_0=2 * math.pi * Delta_0_mhz,
+        robustness_window=2 * math.pi * robustness_window_mhz,
         K=int(K),
-        steps=3000,
-        lr=0.05,
-        device="cpu",
-        end_with_W=False,
-        out_dir="scaling_law_results/data",
-        build_with_detuning=True,
+        out_dir=os.path.join(out_dir, "data"),
     )
 
     os.makedirs(cfg.out_dir, exist_ok=True)
@@ -84,7 +77,7 @@ def _run_single_trial(task):
     )
     input_df.to_csv(os.path.join(cfg.out_dir, f"{config_tag}_input.csv"), index=False)
 
-    phi_final, final_loss = train(
+    phi_final, final_loss, gate_fidelity = train(
         cfg,
         delta_vals,
         alpha_vals,
@@ -94,9 +87,9 @@ def _run_single_trial(task):
         plot_name=os.path.join(cfg.out_dir, f"{config_tag}_matrix_element.png")
     )
 
-    tau_us = (math.pi / (4.0 * cfg.Delta_0))
+    tau_us = math.pi / (2.0 * cfg.Delta_0)
     omega_2pi_mhz = float(Omega_max)
-    delta_2pi_mhz = float(Delta_0)
+    delta_2pi_mhz = float(Delta_0_mhz)
     t_rows = []
     hx_rows = []
     hz_rows = []
@@ -118,7 +111,6 @@ def _run_single_trial(task):
     )
     pulse_df.to_csv(os.path.join(cfg.out_dir, f"{config_tag}.csv"), index=False)
     runtime = get_control_runtime(phi_final, cfg)
-    gate_fidelity = fidelity(phi_final, delta_vals, alpha_vals, cfg)
 
     return {
         "Omega_max (MHz)": Omega_max,
@@ -158,8 +150,10 @@ def main():
 
     if args.small:
         Omega_max_list = [40, 80]  # MHz
-        K_list = [30, 100]
+        K_list = [50, 70]
         num_trials = 4
+        out_dir = "scaling_law_small"
+
 
     fidelity_data = {
         "Omega_max (MHz)": [],
@@ -169,11 +163,13 @@ def main():
         "Gate Fidelity": [],
     }
 
+    os.makedirs(out_dir, exist_ok=True)
+
 
     tasks = []
     for Omega_max, K in itertools.product(Omega_max_list, K_list):
         for trial in range(num_trials):
-            tasks.append((Omega_max, K, trial))
+            tasks.append((Omega_max, K, trial, out_dir))
 
     random.shuffle(tasks)  # Shuffle tasks to get more even progress across different parameter settings
 
@@ -223,7 +219,7 @@ def main():
         pbar.close()
 
     fidelity_df = pd.DataFrame(fidelity_data)
-    fidelity_df.to_csv(os.path.join(out_dir, "scaling_law_fidelity_results.csv"), index=False)
+    fidelity_df.to_csv(os.path.join(out_dir, "scaling_law_fidelity.csv"), index=False)
 
 
 if __name__ == "__main__":
