@@ -1,0 +1,72 @@
+======================================================================
+ANALYTICAL DECOMPOSITION
+  H_c^i(t; theta) = phi_mean(t) + sum_{j=0}^{2} A_j(theta) * b_j(t)
+  Effective DOF: d = 3  (K = 70)
+  Explained variance: 99.92%
+======================================================================
+
+phi_mean: 67 / 71 nonzero entries
+  ||phi_mean|| = 3.4651
+
+──────────────────────────────────────────────────
+Component j = 0  (singular value = 7.8803, variance = 61.60%)
+──────────────────────────────────────────────────
+  A_0(theta) = 0.0015 -0.1023 cos(1*theta) -0.6983 sin(1*theta) -0.1057 cos(2*theta) -0.1697 sin(2*theta) -0.0904 cos(3*theta) +0.0392 sin(3*theta) -0.0518 cos(4*theta) +0.1268 sin(4*theta) -0.0122 cos(5*theta) +0.1385 sin(5*theta) +0.0168 cos(6*theta) +0.0998 sin(6*theta) +0.0306 cos(7*theta) +0.0372 sin(7*theta) +0.0246 cos(8*theta) -0.0236 sin(8*theta) +0.0034 cos(9*theta) -0.0633 sin(9*theta) -0.0139 cos(10*theta) -0.0656 sin(10*theta)
+  Fourier fit residual: 7.51e-03
+  b_0(t): dominant phase indices (top 8):
+    phi[ 70] weight = +0.4654
+    phi[  1] weight = +0.2604
+    phi[  2] weight = +0.2555
+    phi[  0] weight = +0.2533
+    phi[  7] weight = -0.2490
+    phi[  5] weight = -0.2463
+    phi[ 65] weight = -0.2384
+    phi[ 69] weight = +0.1890
+  ||b_0|| = 1.0000
+
+──────────────────────────────────────────────────
+Component j = 1  (singular value = 6.0484, variance = 36.29%)
+──────────────────────────────────────────────────
+  A_1(theta) = 0.0034 -0.3910 cos(1*theta) +0.1392 sin(1*theta) -0.2976 cos(2*theta) +0.0214 sin(2*theta) -0.2065 cos(3*theta) -0.0104 sin(3*theta) -0.0975 cos(4*theta) -0.0204 sin(4*theta) +0.0074 cos(5*theta) -0.0245 sin(5*theta) +0.0853 cos(6*theta) -0.0158 sin(6*theta) +0.1157 cos(7*theta) -0.0060 sin(7*theta) +0.0938 cos(8*theta) +0.0268 cos(9*theta) +0.0051 sin(9*theta) -0.0193 cos(10*theta) +0.0064 sin(10*theta)
+  Fourier fit residual: 8.73e-03
+  b_1(t): dominant phase indices (top 8):
+    phi[ 63] weight = +0.2986
+    phi[ 46] weight = +0.2716
+    phi[  3] weight = -0.2714
+    phi[ 20] weight = -0.2612
+    phi[ 34] weight = +0.2608
+    phi[ 11] weight = -0.2547
+    phi[ 47] weight = -0.2309
+    phi[ 22] weight = +0.2052
+  ||b_1|| = 1.0000
+
+──────────────────────────────────────────────────
+Component j = 2  (singular value = 1.4283, variance = 2.02%)
+──────────────────────────────────────────────────
+  A_2(theta) = 0.1025 cos(1*theta) +0.0074 sin(1*theta) -0.0391 cos(2*theta) -0.0599 cos(3*theta) -0.0046 sin(3*theta) -0.0353 cos(4*theta) -0.0143 cos(5*theta) +0.0119 cos(6*theta) -0.0016 sin(6*theta) +0.0309 cos(7*theta) +0.0044 sin(7*theta) +0.0323 cos(8*theta) +0.0013 sin(8*theta) +0.0074 cos(9*theta) -0.0060 cos(10*theta) -0.0019 sin(10*theta)
+  Fourier fit residual: 5.42e-04
+  b_2(t): dominant phase indices (top 8):
+    phi[ 55] weight = -0.2940
+    phi[ 13] weight = -0.2902
+    phi[ 36] weight = +0.2609
+    phi[  5] weight = +0.2344
+    phi[ 35] weight = -0.2193
+    phi[ 43] weight = +0.2144
+    phi[ 60] weight = -0.2096
+    phi[  2] weight = -0.2009
+  ||b_2|| = 1.0000
+
+======================================================================
+RECONSTRUCTION FORMULA
+  For a given theta, the QSP phases are:
+    phi_j = mean_phi_j + sum_{k=0}^{2} A_k(theta) * b_k[j]
+  Then the pulse schedule is built via phi_to_pulse_df(phi).
+======================================================================
+
+======================================================================
+FIDELITY COMPARISON: NN (original) vs PCA (reconstructed)
+======================================================================
+  theta =    0.25*pi  |  NN = 0.966820  |  PCA = 0.968925
+  theta =    0.50*pi  |  NN = 0.976838  |  PCA = 0.975912
+  theta =    1.00*pi  |  NN = 0.978615  |  PCA = 0.978892
+======================================================================
