@@ -30,13 +30,13 @@ $$U(\theta) = C(\phi_0)\, S(\theta)\, C(\phi_1)\, S(\theta)\, \cdots\, C(\phi_K)
 
 where:
 - **Signal operator** $S(\theta) = R_x(\theta)$ — free evolution under the detuning
-- **Control operator** $C(\phi_j; \Delta)$ — a driven rotation whose axis is tilted by the detuning $\Delta$
+- **Control operator** $C(\phi_j; \delta)$ — a driven rotation whose axis is tilted by the detuning $\delta$
 
-The detuning $\Delta$ maps to a QSP angle via $\theta = \frac{\pi}{2}\left(1 + \frac{\Delta}{\Delta_0}\right) \in [0, \pi]$.
+The detuning $\delta$ maps to a QSP angle via $\theta = \frac{\pi}{2}\left(1 + \frac{\delta}{\Delta_0}\right) \in [0, \pi]$.
 
-Gate fidelity is measured as the entanglement fidelity:
+Gate fidelity is measured as the single gate haar-averaged fidelity:
 
-$$F = \frac{|\operatorname{Tr}(U_\text{target}^\dagger\, U)|^2 + 2}{6}$$
+$$F = \frac{|Tr(U_\text{target}^\dagger\, U)|^2 + 2}{6}$$
 
 averaged over detuning samples within the robustness window.
 
