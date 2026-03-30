@@ -6,6 +6,8 @@ Usage (Colab A100):
 Each K value runs as a separate subprocess, all sharing the GPU.
 """
 
+import argparse
+import os
 import subprocess
 import sys
 
@@ -13,12 +15,16 @@ K_VALUES = [100, 150, 200, 300]
 
 
 def main():
+    ap = argparse.ArgumentParser(description="Run PCA analysis for multiple K values in parallel")
+    ap.add_argument("--out_dir", type=str, required=True, help="Base output directory")
+    args = ap.parse_args()
+
     procs = []
     for K in K_VALUES:
         cmd = [
             sys.executable, "pca_analysis_of_qsp.py",
             "--K", str(K),
-            "--out_dir", f"pca_output_K={K}",
+            "--out_dir", os.path.join(args.out_dir, f"pca_output_K={K}"),
             "--device", "auto",
             "--skip_tests",
         ]
