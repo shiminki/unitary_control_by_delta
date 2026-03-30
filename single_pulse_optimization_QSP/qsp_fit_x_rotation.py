@@ -233,15 +233,17 @@ def build_qsp_unitary_batched(
     delta: torch.Tensor,
     Delta_0: float,
     Omega: float,
-) -> torch.Tensor:
+):
     """
-    Batched QSP unitary builder — processes multiple phi vectors in parallel.
+    Batched QSP unitary builder — all-real arithmetic for torch.compile.
 
-    Same physics as build_qsp_unitary, but vectorized over both a batch of
-    phi vectors AND a batch of detuning values simultaneously.  Uses scalar
-    element-wise ops on (B*D,) tensors instead of torch.bmm on (B*D, 2, 2),
-    which eliminates per-iteration tensor allocation and enables torch.compile
-    to fuse operations across loop iterations.
+    Same physics as build_qsp_unitary, but:
+      1) Vectorized over both B phi vectors and D detuning values.
+      2) Uses purely real (float64) element-wise ops — no complex tensors —
+         so torch.compile/inductor can fully fuse and codegen the K loop.
+
+    Each 2x2 complex matrix element is tracked as two float64 scalars
+    (real, imag).  Complex multiply (a+ib)(c+id) = (ac-bd) + i(ad+bc).
 
     Parameters
     ----------
@@ -252,7 +254,8 @@ def build_qsp_unitary_batched(
 
     Returns
     -------
-    (B, D, 2, 2) complex128 unitary tensor
+    (U_re, U_im) : tuple of two (B, D, 2, 2) float64 tensors.
+        U = U_re + i*U_im is the complex unitary.
     """
     assert phi.ndim == 2, "phi must be shape [B, K+1]"
     B, Kp1 = phi.shape
@@ -267,53 +270,77 @@ def build_qsp_unitary_batched(
     delta_flat = delta.unsqueeze(0).expand(B, D).reshape(BD)
     theta_flat = theta.unsqueeze(0).expand(B, D).reshape(BD)
 
-    # Pre-compute signal operator components (constant across K loop)
-    w_c = torch.cos(theta_flat / 2).to(torch.complex128)   # diagonal
-    w_s = (-1j * torch.sin(theta_flat / 2))                # off-diagonal
+    # Signal operator W = [[wc, -i*ws], [-i*ws, wc]]  (all real components)
+    wc = torch.cos(theta_flat / 2)   # real diagonal
+    ws = torch.sin(theta_flat / 2)   # used as: off-diag = (0, -ws)
 
-    # Pre-compute control operator quantities (constant across K loop)
+    # Control operator pre-computation
     norm = torch.sqrt(Omega ** 2 + delta_flat ** 2)  # (BD,)
 
-    # U = Identity: track 4 scalar components as (BD,) complex128 tensors
-    u00 = torch.ones(BD, dtype=torch.complex128, device=dev)
-    u01 = torch.zeros(BD, dtype=torch.complex128, device=dev)
-    u10 = torch.zeros(BD, dtype=torch.complex128, device=dev)
-    u11 = torch.ones(BD, dtype=torch.complex128, device=dev)
+    # U = I: track 8 real scalars (re/im for each 2x2 element)
+    u00_re = torch.ones(BD, dtype=torch.float64, device=dev)
+    u00_im = torch.zeros(BD, dtype=torch.float64, device=dev)
+    u01_re = torch.zeros(BD, dtype=torch.float64, device=dev)
+    u01_im = torch.zeros(BD, dtype=torch.float64, device=dev)
+    u10_re = torch.zeros(BD, dtype=torch.float64, device=dev)
+    u10_im = torch.zeros(BD, dtype=torch.float64, device=dev)
+    u11_re = torch.ones(BD, dtype=torch.float64, device=dev)
+    u11_im = torch.zeros(BD, dtype=torch.float64, device=dev)
 
     for j in range(K + 1):
-        # --- Control operator: R_z(phi[:, j]; delta) @ U ---
+        # --- Control operator R @ U ---
+        # R = [[c - i*sd, -i*so], [-i*so, c + i*sd]]
+        # where c=cos(|λ|), sd=sin(|λ|)*sign(φ)*Ω/‖H‖, so=sin(|λ|)*δ/‖H‖
         phase_flat = phi[:, j].unsqueeze(1).expand(B, D).reshape(BD)
         abs_lamb = torch.abs(phase_flat) / (2 * Omega) * norm
         sign_phase = torch.sign(phase_flat)
-        c = torch.cos(abs_lamb).to(torch.complex128)
+        c = torch.cos(abs_lamb)
         s = torch.sin(abs_lamb)
-        r_diag_im = s * sign_phase * Omega / norm   # imaginary part of diagonal
-        r_off_im = s * delta_flat / norm             # imaginary part of off-diagonal
-        # rotation: [[c - i*r_diag_im, -i*r_off_im], [-i*r_off_im, c + i*r_diag_im]]
-        r00 = c - 1j * r_diag_im
-        r11 = c + 1j * r_diag_im
-        r_off = -1j * r_off_im
-        n00 = r00 * u00 + r_off * u10
-        n01 = r00 * u01 + r_off * u11
-        n10 = r_off * u00 + r11 * u10
-        n11 = r_off * u01 + r11 * u11
-        u00, u01, u10, u11 = n00, n01, n10, n11
+        sd = s * sign_phase * Omega / norm    # Im of diagonal
+        so = s * delta_flat / norm            # Im of off-diagonal
+
+        # R components: r00=(c,-sd), r01=(0,-so), r10=(0,-so), r11=(c,sd)
+        # N = R @ U  (complex matmul via real arithmetic)
+        n00_re =  c * u00_re + sd * u00_im + so * u10_im
+        n00_im =  c * u00_im - sd * u00_re - so * u10_re
+        n01_re =  c * u01_re + sd * u01_im + so * u11_im
+        n01_im =  c * u01_im - sd * u01_re - so * u11_re
+        n10_re =  so * u00_im + c * u10_re - sd * u10_im
+        n10_im = -so * u00_re + c * u10_im + sd * u10_re
+        n11_re =  so * u01_im + c * u11_re - sd * u11_im
+        n11_im = -so * u01_re + c * u11_im + sd * u11_re
+        u00_re, u00_im = n00_re, n00_im
+        u01_re, u01_im = n01_re, n01_im
+        u10_re, u10_im = n10_re, n10_im
+        u11_re, u11_im = n11_re, n11_im
 
         if j < K:
-            # --- Signal operator: W_signal @ U ---
-            # W = [[w_c, w_s], [w_s, w_c]]
-            n00 = w_c * u00 + w_s * u10
-            n01 = w_c * u01 + w_s * u11
-            n10 = w_s * u00 + w_c * u10
-            n11 = w_s * u01 + w_c * u11
-            u00, u01, u10, u11 = n00, n01, n10, n11
+            # --- Signal operator W @ U ---
+            # W = [[wc, -i*ws], [-i*ws, wc]]
+            # W components: w00=(wc,0), w01=(0,-ws), w10=(0,-ws), w11=(wc,0)
+            n00_re = wc * u00_re + ws * u10_im
+            n00_im = wc * u00_im - ws * u10_re
+            n01_re = wc * u01_re + ws * u11_im
+            n01_im = wc * u01_im - ws * u11_re
+            n10_re = ws * u00_im + wc * u10_re
+            n10_im = -ws * u00_re + wc * u10_im
+            n11_re = ws * u01_im + wc * u11_re
+            n11_im = -ws * u01_re + wc * u11_im
+            u00_re, u00_im = n00_re, n00_im
+            u01_re, u01_im = n01_re, n01_im
+            u10_re, u10_im = n10_re, n10_im
+            u11_re, u11_im = n11_re, n11_im
 
-    # Reconstruct (B, D, 2, 2)
-    U = torch.stack([
-        torch.stack([u00, u01], dim=-1),
-        torch.stack([u10, u11], dim=-1),
+    # Reconstruct (B, D, 2, 2) real and imaginary parts
+    U_re = torch.stack([
+        torch.stack([u00_re, u01_re], dim=-1),
+        torch.stack([u10_re, u11_re], dim=-1),
     ], dim=-2).reshape(B, D, 2, 2)
-    return U
+    U_im = torch.stack([
+        torch.stack([u00_im, u01_im], dim=-1),
+        torch.stack([u10_im, u11_im], dim=-1),
+    ], dim=-2).reshape(B, D, 2, 2)
+    return U_re, U_im
 
 
 # ─────────────────────────────────────────────────────────────────────────────

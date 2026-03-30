@@ -70,17 +70,21 @@ def compute_batch_loss(
     phi_batch = net(alpha_batch)  # (B, K+1)
 
     # Batched QSP: all B phi vectors x all D detunings in one call
-    U = build_qsp_unitary_batched(
+    # Returns real/imag parts separately (no complex tensors) for torch.compile
+    U_re, U_im = build_qsp_unitary_batched(
         phi_batch, delta_all, net.Delta_0_ang, net.Omega_ang
-    )  # (B, D, 2, 2)
-    pred = U[:, :, 0, 0]  # (B, D)
+    )  # each (B, D, 2, 2) float64
+    pred_re = U_re[:, :, 0, 0]  # (B, D)
+    pred_im = U_im[:, :, 0, 0]  # (B, D)
 
-    # Target u_00: e^{-i alpha/2} at target peak, 1 at off-peaks
-    # peak_mask (D,) -> (1, D); alpha_batch (B,) -> (B, 1)
+    # Target u_00: e^{-i alpha/2} = cos(alpha/2) - i*sin(alpha/2)
+    # At target peak alpha = alpha_b; at off-peaks alpha = 0 (target = 1+0i)
     alpha_expanded = alpha_batch.unsqueeze(1) * peak_mask.unsqueeze(0).to(torch.float64)  # (B, D)
-    target = (torch.cos(alpha_expanded / 2) - 1j * torch.sin(alpha_expanded / 2)).to(torch.complex128)
+    target_re = torch.cos(alpha_expanded / 2)
+    target_im = -torch.sin(alpha_expanded / 2)
 
-    return ((pred - target).abs() ** 2).mean()
+    # |pred - target|^2 = (re diff)^2 + (im diff)^2
+    return ((pred_re - target_re) ** 2 + (pred_im - target_im) ** 2).mean()
 
 
 def train_nn(
