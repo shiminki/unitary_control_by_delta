@@ -9,7 +9,7 @@ from .constants import DEFAULT_K, DELTA_CENTERS_MHZ, OMEGA_MHZ, DELTA_0_MHZ, ROB
 
 
 class PulseGeneratorNet(nn.Module):
-    """Neural network mapping rotation angle theta -> QSP phases phi[0..K].
+    """Neural network mapping rotation angle alpha -> QSP phases phi[0..K].
 
     Parameters
     ----------
@@ -23,7 +23,7 @@ class PulseGeneratorNet(nn.Module):
         Number of hidden layers.
     n_freq : int
         Number of Fourier frequencies for the input encoding.
-        Input dim = 2 * n_freq: [cos(theta), sin(theta), cos(2*theta), ...].
+        Input dim = 2 * n_freq: [cos(alpha), sin(alpha), cos(2*alpha), ...].
     delta_centers_mhz : list
         Detuning peak centers in MHz.
     Omega_mhz : float
@@ -79,24 +79,25 @@ class PulseGeneratorNet(nn.Module):
             self.mlp[-1].weight.mul_(0.01)
             self.mlp[-1].bias.zero_()
 
-    def forward(self, theta: torch.Tensor) -> torch.Tensor:
+    def forward(self, alpha: torch.Tensor) -> torch.Tensor:
         """Map rotation angle(s) to QSP phase vectors.
 
         Parameters
         ----------
-        theta : (B,) tensor of rotation angles in radians.
+        alpha : (B,) tensor of rotation angles in radians.
 
         Returns
         -------
         (B, K+1) tensor of QSP phase values.
         """
-        # Fourier features with half-angle: [cos(θ/2), sin(θ/2), cos(θ), sin(θ), ...]
-        # Using θ/2 gives a 4π-periodic encoding, matching the natural period of
-        # R_x(θ). The naive θ encoding (period 2π) aliases θ=0 and θ=2π to the
+        # Fourier features with half-angle: [cos(α/2), sin(α/2), cos(α), sin(α), ...]
+        # Using α/2 gives a 4π-periodic encoding, matching the natural period of
+        # R_x(α). The naive α encoding (period 2π) aliases α=0 and α=2π to the
         # same feature vector despite having opposite targets (u₀₀=+1 vs -1),
         # creating a gradient conflict that degrades fidelity near both endpoints.
-        ks = torch.arange(1, self.n_freq + 1, dtype=theta.dtype, device=theta.device)
-        # theta: (B,) -> (B, 1); ks: (n_freq,) -> angles: (B, n_freq)
-        angles = (theta / 2).unsqueeze(-1) * ks.unsqueeze(0)
+        ks = torch.arange(1, self.n_freq + 1, dtype=alpha.dtype, device=alpha.device)
+        # alpha: (B,) -> (B, 1); ks: (n_freq,) -> angles: (B, n_freq)
+        # Use alpha/2 because R_x(alpha) = exp^(-i X * alpha/2) has period of 4pi
+        angles = (alpha / 2).unsqueeze(-1) * ks.unsqueeze(0)
         x = torch.cat([torch.cos(angles), torch.sin(angles)], dim=-1)  # (B, 2*n_freq)
         return self.mlp(x)  # (B, K+1)

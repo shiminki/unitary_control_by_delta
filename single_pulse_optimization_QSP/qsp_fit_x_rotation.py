@@ -228,6 +228,77 @@ def build_qsp_unitary(
     return U
 
 
+def build_qsp_unitary_batched(
+    phi: torch.Tensor,
+    delta: torch.Tensor,
+    Delta_0: float,
+    Omega: float,
+) -> torch.Tensor:
+    """
+    Batched QSP unitary builder — processes multiple phi vectors in parallel.
+
+    Same physics as build_qsp_unitary, but vectorized over both a batch of
+    phi vectors AND a batch of detuning values simultaneously.
+
+    Parameters
+    ----------
+    phi : (B, K+1) tensor of QSP phase angles (radians)
+    delta : (D,) tensor of detuning values (angular units, rad/us)
+    Delta_0 : maximum detuning range (angular units, rad/us)
+    Omega : Rabi frequency (angular units, rad/us)
+
+    Returns
+    -------
+    (B, D, 2, 2) complex128 unitary tensor
+    """
+    assert phi.ndim == 2, "phi must be shape [B, K+1]"
+    B, Kp1 = phi.shape
+    K = Kp1 - 1
+    D = delta.shape[0]
+    dev = delta.device
+    BD = B * D
+
+    theta = delta_to_theta(delta, Delta_0)  # (D,)
+
+    # Expand to (B*D,) — each batch element sees all D detunings
+    delta_flat = delta.unsqueeze(0).expand(B, D).reshape(BD)
+    theta_flat = theta.unsqueeze(0).expand(B, D).reshape(BD)
+
+    W_signal = signal_operator(theta_flat)  # (BD, 2, 2)
+
+    # Pre-compute quantities reused in every control-operator application
+    Omega_t = torch.full((BD,), Omega, dtype=torch.float64, device=dev)
+    norm = torch.sqrt(Omega_t ** 2 + delta_flat ** 2)  # (BD,)
+
+    def apply_control(Ucur, phase_vec):
+        """Apply control operator.  phase_vec: (B,) — one phase per batch element."""
+        phase_flat = phase_vec.unsqueeze(1).expand(B, D).reshape(BD)
+
+        abs_lamb = torch.abs(phase_flat) / (2 * Omega) * norm
+        sign_phase = torch.sign(phase_flat)
+        c = torch.cos(abs_lamb)
+        s = torch.sin(abs_lamb)
+        sin_diag = s * sign_phase * Omega_t / norm
+        sin_offdiag = s * delta_flat / norm
+
+        rotation = torch.zeros((BD, 2, 2), dtype=torch.complex128, device=dev)
+        rotation[:, 0, 0] = c - 1j * sin_diag
+        rotation[:, 1, 1] = c + 1j * sin_diag
+        rotation[:, 0, 1] = -1j * sin_offdiag
+        rotation[:, 1, 0] = -1j * sin_offdiag
+
+        return torch.bmm(rotation, Ucur)
+
+    I = torch.eye(2, dtype=torch.complex128, device=dev).unsqueeze(0).expand(BD, 2, 2).clone()
+
+    U = apply_control(I, phi[:, 0])
+    for j in range(K):
+        U = torch.bmm(W_signal, U)
+        U = apply_control(U, phi[:, j + 1])
+
+    return U.reshape(B, D, 2, 2)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Fidelity
 # ─────────────────────────────────────────────────────────────────────────────

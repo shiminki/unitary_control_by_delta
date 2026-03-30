@@ -3,3 +3,4 @@ __pycache__
 .pytest_cache
 neural_network_optimization
 nn_pulse_output
+pca_analysis_output*

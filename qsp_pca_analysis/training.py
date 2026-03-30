@@ -6,7 +6,7 @@ import os
 import torch
 from tqdm import tqdm
 
-from single_pulse_optimization_QSP.qsp_fit_x_rotation import build_qsp_unitary
+from single_pulse_optimization_QSP.qsp_fit_x_rotation import build_qsp_unitary, build_qsp_unitary_batched
 
 from .constants import (
     DEFAULT_K, DELTA_CENTERS_MHZ, OMEGA_MHZ, DELTA_0_MHZ,
@@ -47,52 +47,40 @@ def presample_detunings(
 
 def compute_batch_loss(
     net: PulseGeneratorNet,
-    theta_batch: torch.Tensor,
+    alpha_batch: torch.Tensor,
     delta_all: torch.Tensor,
     peak_mask: torch.Tensor,
 ) -> torch.Tensor:
     """Compute u_00 MSE loss for a batch of target rotation angles.
 
-    Uses pre-sampled, fixed detuning values (no stochastic resampling).
-    Computes loss directly from QSP unitary u_00 element—no gradient
-    regularization overhead, so only 1 build_qsp_unitary call per theta.
+    Fully vectorized: processes all B alpha values and D detuning values
+    in a single batched QSP unitary call (no Python loop over batch).
 
     Parameters
     ----------
     net : PulseGeneratorNet
-    theta_batch : (B,) tensor of target rotation angles.
-    delta_all : (N*S,) pre-sampled detuning values.
-    peak_mask : (N*S,) bool, True for target-peak samples.
+    alpha_batch : (B,) tensor of target rotation angles.
+    delta_all : (D,) pre-sampled detuning values (D = N_peaks * samples_per_peak).
+    peak_mask : (D,) bool, True for target-peak samples.
 
     Returns
     -------
     Scalar loss tensor (differentiable).
     """
-    B = theta_batch.shape[0]
-    device = theta_batch.device
+    phi_batch = net(alpha_batch)  # (B, K+1)
 
-    phi_batch = net(theta_batch)  # (B, K+1)
+    # Batched QSP: all B phi vectors x all D detunings in one call
+    U = build_qsp_unitary_batched(
+        phi_batch, delta_all, net.Delta_0_ang, net.Omega_ang
+    )  # (B, D, 2, 2)
+    pred = U[:, :, 0, 0]  # (B, D)
 
-    total_loss = torch.tensor(0.0, dtype=torch.float64, device=device)
+    # Target u_00: e^{-i alpha/2} at target peak, 1 at off-peaks
+    # peak_mask (D,) -> (1, D); alpha_batch (B,) -> (B, 1)
+    alpha_expanded = alpha_batch.unsqueeze(1) * peak_mask.unsqueeze(0).to(torch.float64)  # (B, D)
+    target = (torch.cos(alpha_expanded / 2) - 1j * torch.sin(alpha_expanded / 2)).to(torch.complex128)
 
-    for b in range(B):
-        phi_b = phi_batch[b]  # (K+1,)
-
-        # Alpha for target peak = theta_b, for other peaks = 0
-        alpha_all = torch.where(
-            peak_mask,
-            theta_batch[b].expand_as(delta_all),
-            torch.zeros_like(delta_all),
-        )
-
-        U = build_qsp_unitary(phi_b, delta_all, net.Delta_0_ang, net.Omega_ang)
-        pred = U[:, 0, 0]  # (N*S,)
-        target = (torch.cos(alpha_all / 2) - 1j * torch.sin(alpha_all / 2)).to(torch.complex128)
-
-        loss_b = ((pred - target).abs() ** 2).mean()
-        total_loss = total_loss + loss_b
-
-    return total_loss / B
+    return ((pred - target).abs() ** 2).mean()
 
 
 def train_nn(
@@ -113,6 +101,7 @@ def train_nn(
     verbose: bool = True,
     out_dir: str = "nn_pulse_output",
     resample_every: int = 0,
+    alpha_max: float = 4 * math.pi,
 ) -> PulseGeneratorNet:
     """Train a PulseGeneratorNet for a given peak index.
 
@@ -157,10 +146,10 @@ def train_nn(
                 net.Delta_0_ang, samples_per_peak, device,
             )
 
-        # Ensuring it covers theta = 0 and 2pi
-        theta_batch = (torch.rand(batch_size, dtype=torch.float64, device=device) * (1 + 2 * EPS) - EPS) \
-            * 2 * math.pi
-        loss = compute_batch_loss(net, theta_batch, delta_all, peak_mask)
+        # Ensuring it covers alpha = 0 and alpha_max
+        alpha_batch = (torch.rand(batch_size, dtype=torch.float64, device=device) * (1 + 2 * EPS) - EPS) \
+            * alpha_max
+        loss = compute_batch_loss(net, alpha_batch, delta_all, peak_mask)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -208,6 +197,7 @@ def load_or_train_nn(
     out_dir: str = "nn_pulse_output",
     resample_every: int = 0,
     force_retrain: bool = False,
+    alpha_max: float = 4 * math.pi,
 ) -> PulseGeneratorNet:
     """Load cached NN for (peak_index, K) if available, otherwise train.
 
@@ -240,5 +230,5 @@ def load_or_train_nn(
         Omega_mhz=Omega_mhz, Delta_0_mhz=Delta_0_mhz,
         robustness_window_mhz=robustness_window_mhz,
         device=device, verbose=verbose, out_dir=out_dir,
-        resample_every=resample_every,
+        resample_every=resample_every, alpha_max=alpha_max,
     )

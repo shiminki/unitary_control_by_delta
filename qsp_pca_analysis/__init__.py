@@ -7,8 +7,8 @@ model : PulseGeneratorNet (theta -> QSP phases)
 pulse : phi_to_pulse_df (phases -> pulse schedule)
 training : train_nn, load_or_train_nn
 evaluation : evaluate_nn, compute_fidelity_for_phi, verify_phi_fidelities
-pca : pca_analysis, reconstruct_phi_analytical, format_analytical_form
-plotting : plot_pca_results, plot_tsne, plot_comparative_pulses, plot_comparative_matrix_elements
+pca : pca_analysis, reconstruct_phi_analytical, reconstruct_phi_polyfit, format_analytical_form
+plotting : plot_pca_overview, plot_pca_components, plot_amplitude_components, plot_tsne, plot_comparative_pulses, plot_comparative_matrix_elements
 tests : run_tests, run_acceptance_test
 """
 
@@ -25,10 +25,11 @@ from .evaluation import (
     evaluate_nn, compute_fidelity_for_phi, verify_phi_fidelities,
 )
 from .pca import (
-    pca_analysis, save_pca_csv, reconstruct_phi_analytical, format_analytical_form,
+    pca_analysis, save_pca_csv, reconstruct_phi_analytical,
+    reconstruct_phi_polyfit, format_analytical_form,
 )
 from .plotting import (
-    plot_pca_results, plot_tsne, plot_comparative_pulses,
-    plot_comparative_matrix_elements,
+    plot_pca_overview, plot_pca_components, plot_amplitude_components,
+    plot_tsne, plot_comparative_pulses, plot_comparative_matrix_elements,
 )
 from .tests import run_tests, run_acceptance_test

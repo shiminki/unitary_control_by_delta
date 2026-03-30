@@ -22,13 +22,13 @@ class TestPulseGeneratorNetShapes(unittest.TestCase):
 
     def test_single_input(self):
         net = PulseGeneratorNet(peak_index=0, K=10, n_freq=4)
-        theta = torch.tensor([1.0], dtype=torch.float64)
-        self.assertEqual(net(theta).shape, (1, 11))
+        alpha = torch.tensor([1.0], dtype=torch.float64)
+        self.assertEqual(net(alpha).shape, (1, 11))
 
     def test_batch_input(self):
         net = PulseGeneratorNet(peak_index=0, K=30, n_freq=8)
-        theta = torch.rand(16, dtype=torch.float64) * 2 * math.pi
-        self.assertEqual(net(theta).shape, (16, 31))
+        alpha = torch.rand(16, dtype=torch.float64) * 4 * math.pi
+        self.assertEqual(net(alpha).shape, (16, 31))
 
     def test_output_dtype(self):
         net = PulseGeneratorNet(peak_index=0, K=5, n_freq=4)
@@ -77,13 +77,13 @@ class TestGradientFlow(unittest.TestCase):
     def test_gradients_exist(self):
         torch.manual_seed(42)
         net = PulseGeneratorNet(peak_index=0, K=4, hidden_dim=16, num_layers=2, n_freq=4)
-        theta = torch.tensor([1.0], dtype=torch.float64)
+        alpha = torch.tensor([1.0], dtype=torch.float64)
 
         delta_all, peak_mask = presample_detunings(
             0, net.delta_centers_ang, net.robustness_window_ang,
             net.Delta_0_ang, samples_per_peak=32,
         )
-        loss = compute_batch_loss(net, theta, delta_all, peak_mask)
+        loss = compute_batch_loss(net, alpha, delta_all, peak_mask)
         loss.backward()
 
         for name, param in net.named_parameters():
@@ -106,17 +106,17 @@ class TestTrainingReducesLoss(unittest.TestCase):
             net.Delta_0_ang, samples_per_peak=64,
         )
 
-        theta_eval = torch.tensor([0.0, math.pi], dtype=torch.float64)
-        initial_loss = compute_batch_loss(net, theta_eval, delta_all, peak_mask).item()
+        alpha_eval = torch.tensor([0.0, math.pi, 3 * math.pi], dtype=torch.float64)
+        initial_loss = compute_batch_loss(net, alpha_eval, delta_all, peak_mask).item()
 
         for _ in range(200):
-            theta_batch = torch.rand(4, dtype=torch.float64) * 2 * math.pi
-            loss = compute_batch_loss(net, theta_batch, delta_all, peak_mask)
+            alpha_batch = torch.rand(4, dtype=torch.float64) * 4 * math.pi
+            loss = compute_batch_loss(net, alpha_batch, delta_all, peak_mask)
             opt.zero_grad()
             loss.backward()
             opt.step()
 
-        final_loss = compute_batch_loss(net, theta_eval, delta_all, peak_mask).item()
+        final_loss = compute_batch_loss(net, alpha_eval, delta_all, peak_mask).item()
         self.assertLess(final_loss, initial_loss,
                         f"Loss didn't decrease: {initial_loss:.4e} -> {final_loss:.4e}")
 
@@ -155,13 +155,13 @@ class TestPCADimensions(unittest.TestCase):
 
         result = pca_analysis(net, M=M, out_dir=out_dir)
 
-        self.assertEqual(result["phi_matrix"].shape, (M, K + 1))
+        self.assertEqual(result["phi_matrix"].shape, (2 * M, K + 1))
         self.assertEqual(result["mean_phi"].shape, (K + 1,))
-        self.assertEqual(result["theta_grid"].shape, (M,))
+        self.assertEqual(result["alpha_grid"].shape, (2 * M,))
 
         n_dof = result["n_effective_dof"]
         self.assertEqual(result["principal_components"].shape, (K + 1, n_dof))
-        self.assertEqual(result["amplitudes"].shape, (M, n_dof))
+        self.assertEqual(result["amplitudes"].shape, (2 * M, n_dof))
         self.assertGreater(n_dof, 0)
         self.assertLessEqual(n_dof, K + 1)
 
@@ -182,7 +182,7 @@ class TestHighFidelitySingleTarget(unittest.TestCase):
 
         K = 30
         peak_idx = 2  # delta = +32 MHz
-        target_theta = math.pi
+        target_alpha = math.pi
 
         # Smaller NN for single-point memorization (faster convergence)
         net = PulseGeneratorNet(
@@ -199,10 +199,10 @@ class TestHighFidelitySingleTarget(unittest.TestCase):
         opt = torch.optim.Adam(net.parameters(), lr=1e-2)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=8000)
 
-        # Train at fixed theta=pi for 8000 steps (matching GRAPE budget)
-        theta_batch = torch.tensor([target_theta], dtype=torch.float64)
+        # Train at fixed alpha=pi for 8000 steps (matching GRAPE budget)
+        alpha_batch = torch.tensor([target_alpha], dtype=torch.float64)
         for _ in range(8000):
-            loss = compute_batch_loss(net, theta_batch, delta_all, peak_mask)
+            loss = compute_batch_loss(net, alpha_batch, delta_all, peak_mask)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
@@ -212,12 +212,12 @@ class TestHighFidelitySingleTarget(unittest.TestCase):
         # Evaluate via independent fidelity_from_pulse
         net.eval()
         with torch.no_grad():
-            phi = net(torch.tensor([target_theta], dtype=torch.float64)).squeeze(0)
+            phi = net(torch.tensor([target_alpha], dtype=torch.float64)).squeeze(0)
         pdf = phi_to_pulse_df(phi, net.Omega_mhz, net.Delta_0_mhz)
 
         delta_arr = np.array(net.delta_centers_mhz)
         alpha_arr = np.zeros(len(delta_arr))
-        alpha_arr[peak_idx] = target_theta
+        alpha_arr[peak_idx] = target_alpha
 
         fid = fidelity_from_pulse(pdf, delta_arr, alpha_arr,
                                   net.robustness_window_mhz, sample_size=5000)
