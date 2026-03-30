@@ -79,6 +79,17 @@ def main():
         device = args.device
     print(f"Using device: {device}")
 
+    # Auto-scale batch_size on GPU to maximize utilization.
+    # Memory scales as O(K * batch_size * D) for autograd saved tensors.
+    batch_size = args.batch_size
+    if device != "cpu" and args.batch_size == 100:  # only auto-scale if user didn't override
+        D = 4 * 128  # N_peaks * samples_per_peak
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory
+        # ~200 bytes per element per K iteration (autograd saved tensors)
+        max_bd = int(gpu_mem * 0.5 / (200 * args.K))
+        batch_size = max(100, min(max_bd // D, 5000))
+        print(f"  Auto batch_size={batch_size} (K={args.K}, GPU={gpu_mem/1e9:.0f}GB)")
+
     torch.manual_seed(42)
     torch.set_default_dtype(torch.float64)
 
@@ -116,7 +127,7 @@ def main():
         n_freq=args.n_freq,
         steps=args.steps,
         lr=args.lr,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         out_dir=actual_out_dir,
         force_retrain=args.force_retrain,
         alpha_max=alpha_max,

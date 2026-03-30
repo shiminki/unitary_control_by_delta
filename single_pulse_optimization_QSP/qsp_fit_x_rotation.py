@@ -238,7 +238,10 @@ def build_qsp_unitary_batched(
     Batched QSP unitary builder — processes multiple phi vectors in parallel.
 
     Same physics as build_qsp_unitary, but vectorized over both a batch of
-    phi vectors AND a batch of detuning values simultaneously.
+    phi vectors AND a batch of detuning values simultaneously.  Uses scalar
+    element-wise ops on (B*D,) tensors instead of torch.bmm on (B*D, 2, 2),
+    which eliminates per-iteration tensor allocation and enables torch.compile
+    to fuse operations across loop iterations.
 
     Parameters
     ----------
@@ -264,39 +267,53 @@ def build_qsp_unitary_batched(
     delta_flat = delta.unsqueeze(0).expand(B, D).reshape(BD)
     theta_flat = theta.unsqueeze(0).expand(B, D).reshape(BD)
 
-    W_signal = signal_operator(theta_flat)  # (BD, 2, 2)
+    # Pre-compute signal operator components (constant across K loop)
+    w_c = torch.cos(theta_flat / 2).to(torch.complex128)   # diagonal
+    w_s = (-1j * torch.sin(theta_flat / 2))                # off-diagonal
 
-    # Pre-compute quantities reused in every control-operator application
-    Omega_t = torch.full((BD,), Omega, dtype=torch.float64, device=dev)
-    norm = torch.sqrt(Omega_t ** 2 + delta_flat ** 2)  # (BD,)
+    # Pre-compute control operator quantities (constant across K loop)
+    norm = torch.sqrt(Omega ** 2 + delta_flat ** 2)  # (BD,)
 
-    def apply_control(Ucur, phase_vec):
-        """Apply control operator.  phase_vec: (B,) — one phase per batch element."""
-        phase_flat = phase_vec.unsqueeze(1).expand(B, D).reshape(BD)
+    # U = Identity: track 4 scalar components as (BD,) complex128 tensors
+    u00 = torch.ones(BD, dtype=torch.complex128, device=dev)
+    u01 = torch.zeros(BD, dtype=torch.complex128, device=dev)
+    u10 = torch.zeros(BD, dtype=torch.complex128, device=dev)
+    u11 = torch.ones(BD, dtype=torch.complex128, device=dev)
 
+    for j in range(K + 1):
+        # --- Control operator: R_z(phi[:, j]; delta) @ U ---
+        phase_flat = phi[:, j].unsqueeze(1).expand(B, D).reshape(BD)
         abs_lamb = torch.abs(phase_flat) / (2 * Omega) * norm
         sign_phase = torch.sign(phase_flat)
-        c = torch.cos(abs_lamb)
+        c = torch.cos(abs_lamb).to(torch.complex128)
         s = torch.sin(abs_lamb)
-        sin_diag = s * sign_phase * Omega_t / norm
-        sin_offdiag = s * delta_flat / norm
+        r_diag_im = s * sign_phase * Omega / norm   # imaginary part of diagonal
+        r_off_im = s * delta_flat / norm             # imaginary part of off-diagonal
+        # rotation: [[c - i*r_diag_im, -i*r_off_im], [-i*r_off_im, c + i*r_diag_im]]
+        r00 = c - 1j * r_diag_im
+        r11 = c + 1j * r_diag_im
+        r_off = -1j * r_off_im
+        n00 = r00 * u00 + r_off * u10
+        n01 = r00 * u01 + r_off * u11
+        n10 = r_off * u00 + r11 * u10
+        n11 = r_off * u01 + r11 * u11
+        u00, u01, u10, u11 = n00, n01, n10, n11
 
-        rotation = torch.zeros((BD, 2, 2), dtype=torch.complex128, device=dev)
-        rotation[:, 0, 0] = c - 1j * sin_diag
-        rotation[:, 1, 1] = c + 1j * sin_diag
-        rotation[:, 0, 1] = -1j * sin_offdiag
-        rotation[:, 1, 0] = -1j * sin_offdiag
+        if j < K:
+            # --- Signal operator: W_signal @ U ---
+            # W = [[w_c, w_s], [w_s, w_c]]
+            n00 = w_c * u00 + w_s * u10
+            n01 = w_c * u01 + w_s * u11
+            n10 = w_s * u00 + w_c * u10
+            n11 = w_s * u01 + w_c * u11
+            u00, u01, u10, u11 = n00, n01, n10, n11
 
-        return torch.bmm(rotation, Ucur)
-
-    I = torch.eye(2, dtype=torch.complex128, device=dev).unsqueeze(0).expand(BD, 2, 2).clone()
-
-    U = apply_control(I, phi[:, 0])
-    for j in range(K):
-        U = torch.bmm(W_signal, U)
-        U = apply_control(U, phi[:, j + 1])
-
-    return U.reshape(B, D, 2, 2)
+    # Reconstruct (B, D, 2, 2)
+    U = torch.stack([
+        torch.stack([u00, u01], dim=-1),
+        torch.stack([u10, u11], dim=-1),
+    ], dim=-2).reshape(B, D, 2, 2)
+    return U
 
 
 # ─────────────────────────────────────────────────────────────────────────────

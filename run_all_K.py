@@ -19,6 +19,11 @@ def main():
     ap.add_argument("--out_dir", type=str, required=True, help="Base output directory")
     args = ap.parse_args()
 
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # Run subprocesses from the repo directory (where pca_analysis_of_qsp.py lives)
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+
     procs = []
     for K in K_VALUES:
         cmd = [
@@ -29,7 +34,7 @@ def main():
             "--skip_tests",
         ]
         print(f"Launching K={K}: {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
+        proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, cwd=repo_dir)
         procs.append((K, proc))
 
     # Wait for all to finish

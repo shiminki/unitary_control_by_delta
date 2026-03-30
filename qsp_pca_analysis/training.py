@@ -133,6 +133,18 @@ def train_nn(
         net.Delta_0_ang, samples_per_peak, device,
     )
 
+    # torch.compile for GPU: fuses element-wise ops across the K loop,
+    # reducing thousands of CUDA kernel launches to a handful.
+    loss_fn = compute_batch_loss
+    if device != "cpu":
+        try:
+            loss_fn = torch.compile(compute_batch_loss)
+            if verbose:
+                print("  Using torch.compile for accelerated training")
+        except Exception:
+            if verbose:
+                print("  torch.compile unavailable, using eager mode")
+
     best_loss = float("inf")
     best_state = None
 
@@ -149,7 +161,7 @@ def train_nn(
         # Ensuring it covers alpha = 0 and alpha_max
         alpha_batch = (torch.rand(batch_size, dtype=torch.float64, device=device) * (1 + 2 * EPS) - EPS) \
             * alpha_max
-        loss = compute_batch_loss(net, alpha_batch, delta_all, peak_mask)
+        loss = loss_fn(net, alpha_batch, delta_all, peak_mask)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
