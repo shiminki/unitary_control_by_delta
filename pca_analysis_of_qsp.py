@@ -80,16 +80,16 @@ def main():
     print(f"Using device: {device}")
 
     # Auto-scale batch_size on GPU to fill ~70 GB target.
-    # torch.compile unrolls the K loop and saves ~16 float64 tensors of size
-    # (batch_size * D) per iteration for the backward pass.
-    # Memory ≈ K * 16 * 8 bytes * batch_size * D = 1024 * K * batch_size * D bytes.
+    # In eager mode (no torch.compile), autograd saves ~16 float64 tensors
+    # of size (batch_size * D) per K iteration for the backward pass.
+    # Measured: ~193 bytes per (batch_size * D) per K iteration.
     batch_size = args.batch_size
     if device != "cpu" and args.batch_size == 100:  # only auto-scale if user didn't override
         D = 4 * 128  # N_peaks * samples_per_peak
         target_bytes = 70 * (1024 ** 3)  # aim for ~70 GB
-        bytes_per_bd_per_k = 1024  # 16 tensors * 8 bytes * 8 (overhead factor)
+        bytes_per_bd_per_k = 200  # ~16 tensors * 8 bytes * ~1.5 overhead
         max_bd = int(target_bytes / (bytes_per_bd_per_k * args.K))
-        batch_size = max(100, min(max_bd // D, 5000))
+        batch_size = max(100, max_bd // D)
         print(f"  Auto batch_size={batch_size} (K={args.K}, target=70GB)")
 
     torch.manual_seed(42)
