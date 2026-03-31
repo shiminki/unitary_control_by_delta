@@ -128,16 +128,16 @@ def train_nn(
         robustness_window_mhz=robustness_window_mhz,
     ).to(device)
 
-    # Scale LR schedule to account for larger effective batch size.
+    # Scale steps and LR schedule to account for larger effective batch size.
     # With batch_size > reference (100), each step covers proportionally more
-    # data, so the cosine schedule should decay faster to match.
+    # data, so both the total steps and cosine schedule are scaled down.
     reference_batch = 100
-    t_max = max(1, int(steps * reference_batch / batch_size))
+    effective_steps = max(1, int(steps * reference_batch / batch_size))
     if verbose and batch_size != reference_batch:
-        print(f"  LR schedule T_max={t_max} (adjusted for batch_size={batch_size})")
+        print(f"  Effective steps={effective_steps} (adjusted for batch_size={batch_size})")
 
     opt = torch.optim.Adam(net.parameters(), lr=lr)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=t_max)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=effective_steps)
 
     # Pre-sample detunings once (like GRAPE)
     delta_all, peak_mask = presample_detunings(
@@ -148,7 +148,7 @@ def train_nn(
     best_loss = float("inf")
     best_state = None
 
-    iterator = tqdm(range(1, steps + 1), desc=f"Training peak {peak_index}") if verbose else range(1, steps + 1)
+    iterator = tqdm(range(1, effective_steps + 1), desc=f"Training peak {peak_index}") if verbose else range(1, effective_steps + 1)
 
     for step in iterator:
         # Optionally resample detunings for generalization
