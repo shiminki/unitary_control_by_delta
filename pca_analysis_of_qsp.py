@@ -50,7 +50,7 @@ def main():
     ap = argparse.ArgumentParser(description="NN pulse generator for QSP")
     ap.add_argument("--peak_index", type=int, default=0, help="Detuning peak index (0..3)")
     ap.add_argument("--K", type=int, default=DEFAULT_K, help="QSP degree")
-    ap.add_argument("--steps", type=int, default=8000, help="Training steps")
+    ap.add_argument("--steps", type=int, default=2000, help="Training steps")
     ap.add_argument("--lr", type=float, default=5e-3, help="Learning rate")
     ap.add_argument("--batch_size", type=int, default=100, help="Theta batch size")
     ap.add_argument("--hidden_dim", type=int, default=256, help="NN hidden dimension")
