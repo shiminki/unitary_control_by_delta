@@ -1,9 +1,9 @@
-"""Run PCA analysis for multiple K values in parallel.
+"""Run PCA analysis for multiple K values sequentially.
 
 Usage (Colab A100):
-    python run_all_K.py
+    python run_all_K.py --out_dir /path/to/output
 
-Each K value runs as a separate subprocess, all sharing the GPU.
+Each K value runs one at a time, using the full GPU memory.
 """
 
 import argparse
@@ -15,7 +15,7 @@ K_VALUES = [100, 150, 200, 300]
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Run PCA analysis for multiple K values in parallel")
+    ap = argparse.ArgumentParser(description="Run PCA analysis for multiple K values sequentially")
     ap.add_argument("--out_dir", type=str, required=True, help="Base output directory")
     args = ap.parse_args()
 
@@ -24,7 +24,7 @@ def main():
     # Run subprocesses from the repo directory (where pca_analysis_of_qsp.py lives)
     repo_dir = os.path.dirname(os.path.abspath(__file__))
 
-    procs = []
+    failed = []
     for K in K_VALUES:
         cmd = [
             sys.executable, "pca_analysis_of_qsp.py",
@@ -33,14 +33,10 @@ def main():
             "--device", "auto",
             "--skip_tests",
         ]
-        print(f"Launching K={K}: {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, cwd=repo_dir)
-        procs.append((K, proc))
-
-    # Wait for all to finish
-    failed = []
-    for K, proc in procs:
-        rc = proc.wait()
+        print(f"\n{'='*60}")
+        print(f"Running K={K}: {' '.join(cmd)}")
+        print(f"{'='*60}")
+        rc = subprocess.call(cmd, cwd=repo_dir)
         if rc != 0:
             failed.append(K)
             print(f"K={K} FAILED (exit code {rc})")
