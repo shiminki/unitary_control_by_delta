@@ -19,7 +19,9 @@ def main():
     ap.add_argument("--out_dir", type=str, required=True, help="Base output directory")
     args = ap.parse_args()
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    # Resolve to absolute path before changing cwd for subprocesses
+    out_dir = os.path.abspath(args.out_dir)
+    os.makedirs(out_dir, exist_ok=True)
 
     # Run subprocesses from the repo directory (where pca_analysis_of_qsp.py lives)
     repo_dir = os.path.dirname(os.path.abspath(__file__))
@@ -29,7 +31,7 @@ def main():
         cmd = [
             sys.executable, "pca_analysis_of_qsp.py",
             "--K", str(K),
-            "--out_dir", os.path.join(args.out_dir, f"pca_output_K={K}"),
+            "--out_dir", os.path.join(out_dir, f"pca_output_K={K}"),
             "--device", "auto",
             "--skip_tests",
         ]
