@@ -128,26 +128,22 @@ def train_nn(
         robustness_window_mhz=robustness_window_mhz,
     ).to(device)
 
+    # Scale LR schedule to account for larger effective batch size.
+    # With batch_size > reference (100), each step covers proportionally more
+    # data, so the cosine schedule should decay faster to match.
+    reference_batch = 100
+    t_max = max(1, int(steps * reference_batch / batch_size))
+    if verbose and batch_size != reference_batch:
+        print(f"  LR schedule T_max={t_max} (adjusted for batch_size={batch_size})")
+
     opt = torch.optim.Adam(net.parameters(), lr=lr)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=t_max)
 
     # Pre-sample detunings once (like GRAPE)
     delta_all, peak_mask = presample_detunings(
         peak_index, net.delta_centers_ang, net.robustness_window_ang,
         net.Delta_0_ang, samples_per_peak, device,
     )
-
-    # torch.compile for GPU: fuses element-wise ops across the K loop,
-    # reducing thousands of CUDA kernel launches to a handful.
-    loss_fn = compute_batch_loss
-    if device != "cpu":
-        try:
-            loss_fn = torch.compile(compute_batch_loss)
-            if verbose:
-                print("  Using torch.compile for accelerated training")
-        except Exception:
-            if verbose:
-                print("  torch.compile unavailable, using eager mode")
 
     best_loss = float("inf")
     best_state = None
@@ -165,7 +161,7 @@ def train_nn(
         # Ensuring it covers alpha = 0 and alpha_max
         alpha_batch = (torch.rand(batch_size, dtype=torch.float64, device=device) * (1 + 2 * EPS) - EPS) \
             * alpha_max
-        loss = loss_fn(net, alpha_batch, delta_all, peak_mask)
+        loss = compute_batch_loss(net, alpha_batch, delta_all, peak_mask)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
