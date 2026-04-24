@@ -21,9 +21,11 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
 
 from .constants import K_LIST, N_PEAKS, OMEGA_LIST
 from .data import sample_alpha

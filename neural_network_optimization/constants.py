@@ -18,5 +18,5 @@ DEFAULT_K = 70
 EPS = 0.01
 ALPHA_RANGE = (-EPS, 4 * math.pi + EPS)
 
-OMEGA_LIST = [20, 40, 80]
+OMEGA_LIST = [40, 80, 120]
 K_LIST = [50, 70, 100, 160]
