@@ -1,217 +1,181 @@
-"""Training pipeline for the joint neural network pulse generator.
-
-Given Omega_max and QSP degree K, trains a JointPulseGeneratorNet that maps
-alpha_vals (N rotation angles) -> QSP phases phi[0..K].
-
-Default configuration:
-    - 4 peaks at delta = (2pi) [-100, -32, 32, 100] MHz
-    - Dataset: union of all-random and one-hot alpha_vals
-
-Usage:
-    # From project root:
-    python -m neural_network_optimization.train --Omega_mhz 80 --K 70 --steps 10000
-
-    # Train for a different Omega_max:
-    python -m neural_network_optimization.train --Omega_mhz 40 --K 50 --steps 15000
-"""
+"""Training loop for PulseNet."""
 
 import argparse
 import math
 import os
-import sys
+import time
 
 import torch
 from tqdm import tqdm
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+from .constants import DEFAULT_K, OMEGA_MHZ
+from .data import build_dataset
+from .model import PulseNet, get_weight_path
+from .physics import build_qsp_unitary_batched
 
-from neural_network_optimization.model import (
-    JointPulseGeneratorNet,
-    presample_detunings_joint,
-    compute_batch_loss_joint,
-    sample_alpha_batch,
-    get_weight_path,
-    DEFAULT_K,
-    DEFAULT_OMEGA_MHZ,
-    N_PEAKS,
-)
+
+def presample_detunings(
+    delta_centers_ang,
+    robustness_window_ang: float,
+    Delta_0_ang: float,
+    samples_per_peak: int = 128,
+    device=None,
+    generator=None,
+):
+    """Pre-sample detuning values within +/- robustness_window of each peak.
+
+    Returns (delta_all, peak_ids) where delta_all is (N*S,) in angular units
+    and peak_ids is (N*S,) long, indicating which peak each sample belongs to.
+    """
+    delta_list, peak_ids = [], []
+    for j, center in enumerate(delta_centers_ang):
+        jitter = (2.0 * torch.rand(samples_per_peak, dtype=torch.float64,
+                                    device=device, generator=generator) - 1.0) * robustness_window_ang
+        delta_s = (center + jitter).clamp(-Delta_0_ang, Delta_0_ang)
+        delta_list.append(delta_s)
+        peak_ids.append(torch.full((samples_per_peak,), j, dtype=torch.long, device=device))
+    return torch.cat(delta_list), torch.cat(peak_ids)
+
+
+def _compute_loss(
+    net: "PulseNet",
+    alpha_batch: torch.Tensor,
+    delta_all: torch.Tensor,
+    peak_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Vectorized u_00 MSE loss using build_qsp_unitary_batched.
+
+    For each sample (b, s) with detuning delta_all[s] near peak peak_ids[s]
+    the target is u_00 = exp(-i alpha_batch[b, peak_ids[s]] / 2).
+    """
+    phi_batch = net(alpha_batch)  # (B, K+1)
+    U_re, U_im = build_qsp_unitary_batched(
+        phi_batch, delta_all, net.Delta_0_ang, net.Omega_ang,
+    )  # each (B, D, 2, 2)
+    pred_re = U_re[..., 0, 0]  # (B, D)
+    pred_im = U_im[..., 0, 0]
+
+    # alpha_targets[b, s] = alpha_batch[b, peak_ids[s]]
+    alpha_targets = alpha_batch.index_select(1, peak_ids)  # (B, D)
+    tgt_re = torch.cos(alpha_targets / 2)
+    tgt_im = -torch.sin(alpha_targets / 2)
+
+    err = (pred_re - tgt_re) ** 2 + (pred_im - tgt_im) ** 2
+    return err.mean()
 
 
 def train(
-    Omega_mhz: float = DEFAULT_OMEGA_MHZ,
-    K: int = DEFAULT_K,
-    steps: int = 20000,
+    Omega: float,
+    K: int,
+    *,
+    n_train: int = 65_536,
+    n_eval: int = 1024,
+    batch_size: int = 512,
+    epochs: int = 40,
     lr: float = 5e-3,
-    batch_size: int = 32,
-    hidden_dim: int = 256,
-    num_layers: int = 6,
-    n_freq: int = 8,
     samples_per_peak: int = 128,
-    resample_every: int = 0,
-    device: str = "cpu",
+    weight_dir: str = "neural_network_optimization/weights",
+    device=None,
+    seed: int = 0,
     verbose: bool = True,
-    out_dir: str = "neural_network_optimization",
-    progress_cb=None,
-) -> JointPulseGeneratorNet:
-    """Train a JointPulseGeneratorNet and save weights.
+) -> "PulseNet":
+    """Train a PulseNet for the given (Omega, K).  Saves best-eval checkpoint.
 
-    Parameters
-    ----------
-    Omega_mhz : Rabi frequency in MHz.
-    K : QSP degree (phi has K+1 elements).
-    steps : Number of training steps.
-    lr : Learning rate.
-    batch_size : Number of alpha_vals per training step.
-    hidden_dim : Width of hidden layers.
-    num_layers : Number of hidden layers.
-    n_freq : Fourier input frequencies.
-    samples_per_peak : Detuning samples per peak for loss computation.
-    resample_every : Resample detunings every N steps (0 = never).
-    device : "cpu" or "cuda".
-    verbose : Print progress bar.
-    out_dir : Directory for saving weights.
-    progress_cb : Optional callback(step, total, loss, eta_seconds).
-
-    Returns
-    -------
-    Trained JointPulseGeneratorNet.
+    Returns the trained network (already loaded with best eval-loss weights).
     """
-    torch.set_default_dtype(torch.float64)
+    torch.manual_seed(int(seed))
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
 
-    net = JointPulseGeneratorNet(
-        K=K,
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-        n_freq=n_freq,
-        Omega_mhz=Omega_mhz,
-    ).to(device)
+    net = PulseNet(Omega=Omega, K=K).to(device)
+
+    alpha_train, alpha_eval = build_dataset(
+        n_train=n_train, n_eval=n_eval, N_peaks=net.N_peaks, seed=seed, device=device,
+    )
+
+    delta_all, peak_ids = presample_detunings(
+        net.delta_centers_ang, net.robustness_window_ang, net.Delta_0_ang,
+        samples_per_peak=samples_per_peak, device=device,
+    )
+
+    steps_per_epoch = max(1, n_train // batch_size)
+    total_steps = epochs * steps_per_epoch
 
     opt = torch.optim.Adam(net.parameters(), lr=lr)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=total_steps)
 
-    delta_all, peak_ids = presample_detunings_joint(
-        net.delta_centers_ang,
-        net.robustness_window_ang,
-        net.Delta_0_ang,
-        samples_per_peak,
-        device,
-    )
-
-    best_loss = float("inf")
     best_state = None
+    best_eval = float("inf")
 
-    import time
     t0 = time.time()
+    it = range(1, epochs + 1)
+    if verbose:
+        it = tqdm(it, desc=f"Omega={Omega} K={K}")
 
-    iterator = (
-        tqdm(range(1, steps + 1), desc=f"Training Omega={Omega_mhz} K={K}")
-        if verbose
-        else range(1, steps + 1)
-    )
+    for epoch in it:
+        net.train()
+        perm = torch.randperm(n_train, device=device)
+        for step in range(steps_per_epoch):
+            idx = perm[step * batch_size : (step + 1) * batch_size]
+            alpha_batch = alpha_train[idx]
+            loss = _compute_loss(net, alpha_batch, delta_all, peak_ids)
 
-    for step in iterator:
-        if resample_every > 0 and step > 1 and step % resample_every == 0:
-            delta_all, peak_ids = presample_detunings_joint(
-                net.delta_centers_ang,
-                net.robustness_window_ang,
-                net.Delta_0_ang,
-                samples_per_peak,
-                device,
-            )
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
+            opt.step()
+            sched.step()
 
-        alpha_batch = sample_alpha_batch(batch_size, N_PEAKS, device)
-        loss = compute_batch_loss_joint(net, alpha_batch, delta_all, peak_ids)
+        # Eval
+        net.eval()
+        with torch.no_grad():
+            eval_loss = 0.0
+            n_chunks = max(1, (n_eval + batch_size - 1) // batch_size)
+            for j in range(n_chunks):
+                ab = alpha_eval[j * batch_size : (j + 1) * batch_size]
+                if ab.shape[0] == 0:
+                    continue
+                eval_loss += _compute_loss(net, ab, delta_all, peak_ids).item() * ab.shape[0]
+            eval_loss /= max(1, n_eval)
 
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
-        opt.step()
-        sched.step()
+        if eval_loss < best_eval:
+            best_eval = eval_loss
+            best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
 
-        loss_val = loss.item()
-        if loss_val < best_loss:
-            best_loss = loss_val
-            best_state = {
-                k: v.detach().cpu().clone() for k, v in net.state_dict().items()
-            }
-
-        if verbose and hasattr(iterator, "set_postfix"):
-            iterator.set_postfix({"loss": f"{loss_val:.4e}", "best": f"{best_loss:.4e}"})
-
-        if progress_cb is not None:
-            elapsed = time.time() - t0
-            rate = step / elapsed if elapsed > 0 else 0.0
-            eta = (steps - step) / rate if rate > 0 else float("inf")
-            progress_cb(step, steps, loss_val, eta)
+        if verbose and hasattr(it, "set_postfix"):
+            it.set_postfix({"eval": f"{eval_loss:.3e}", "best": f"{best_eval:.3e}"})
 
     if best_state is not None:
         net.load_state_dict(best_state)
 
-    # Save weights
-    weight_path = get_weight_path(out_dir, Omega_mhz, K)
-    os.makedirs(os.path.dirname(weight_path), exist_ok=True)
-    torch.save(net.state_dict(), weight_path)
-
+    os.makedirs(weight_dir, exist_ok=True)
+    path = get_weight_path(weight_dir, Omega, K)
+    torch.save(net.state_dict(), path)
     if verbose:
-        print(f"\nBest loss: {best_loss:.4e}")
-        print(f"Weights saved to {weight_path}")
-
+        print(f"[train] Omega={Omega} K={K} best_eval={best_eval:.3e} "
+              f"time={time.time()-t0:.1f}s -> {path}")
     return net
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Train joint NN pulse generator for multi-peak QSP"
-    )
-    parser.add_argument("--Omega_mhz", type=float, default=DEFAULT_OMEGA_MHZ,
-                        help="Rabi frequency in MHz")
-    parser.add_argument("--K", type=int, default=DEFAULT_K,
-                        help="QSP degree")
-    parser.add_argument("--steps", type=int, default=20000,
-                        help="Training steps")
-    parser.add_argument("--lr", type=float, default=5e-3,
-                        help="Learning rate")
-    parser.add_argument("--batch_size", type=int, default=32,
-                        help="Alpha batch size per step")
-    parser.add_argument("--hidden_dim", type=int, default=256,
-                        help="NN hidden dimension")
-    parser.add_argument("--num_layers", type=int, default=6,
-                        help="NN hidden layers")
-    parser.add_argument("--n_freq", type=int, default=8,
-                        help="Fourier input frequencies")
-    parser.add_argument("--samples_per_peak", type=int, default=128,
-                        help="Detuning samples per peak")
-    parser.add_argument("--resample_every", type=int, default=0,
-                        help="Resample detunings every N steps (0=never)")
-    parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--out_dir", type=str, default="neural_network_optimization",
-                        help="Output directory for weights")
-    args = parser.parse_args()
-
-    torch.manual_seed(42)
-
-    print("=" * 60)
-    print(f"Training joint NN: Omega_max={args.Omega_mhz} MHz, K={args.K}")
-    print(f"  steps={args.steps}, batch_size={args.batch_size}, lr={args.lr}")
-    print(f"  hidden_dim={args.hidden_dim}, num_layers={args.num_layers}")
-    print(f"  n_freq={args.n_freq}, samples_per_peak={args.samples_per_peak}")
-    print("=" * 60)
-
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--Omega", type=float, default=OMEGA_MHZ)
+    ap.add_argument("--K", type=int, default=DEFAULT_K)
+    ap.add_argument("--n_train", type=int, default=65_536)
+    ap.add_argument("--n_eval", type=int, default=1024)
+    ap.add_argument("--batch_size", type=int, default=512)
+    ap.add_argument("--epochs", type=int, default=40)
+    ap.add_argument("--lr", type=float, default=5e-3)
+    ap.add_argument("--weight_dir", type=str, default="neural_network_optimization/weights")
+    ap.add_argument("--device", type=str, default=None)
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
     train(
-        Omega_mhz=args.Omega_mhz,
-        K=args.K,
-        steps=args.steps,
-        lr=args.lr,
-        batch_size=args.batch_size,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-        n_freq=args.n_freq,
-        samples_per_peak=args.samples_per_peak,
-        resample_every=args.resample_every,
-        device=args.device,
-        out_dir=args.out_dir,
+        Omega=args.Omega, K=args.K,
+        n_train=args.n_train, n_eval=args.n_eval,
+        batch_size=args.batch_size, epochs=args.epochs, lr=args.lr,
+        weight_dir=args.weight_dir, device=args.device, seed=args.seed,
     )
 
 

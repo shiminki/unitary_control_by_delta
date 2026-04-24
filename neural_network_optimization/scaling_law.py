@@ -1,211 +1,179 @@
-"""Scaling law study using the neural network pulse generator.
+"""Scaling-law experiment over (Omega, K).
 
-For each (Omega_max, K) pair:
-  1. Train ONE model (or load existing weights)
-  2. Run many trials with random alpha_vals via fast inference
-  3. Evaluate fidelity and runtime
+For each config:
+  1. Load weights (train if missing).
+  2. Sample N_EVAL_TRIALS alphas uniformly from [-EPS, 4*pi + EPS]^N_peaks.
+  3. Record fidelity and runtime for each trial.
+  4. Aggregate into summary.
 
-This is dramatically faster than the gradient-based scaling_law.py,
-which trains from scratch for every single trial.
-
-Usage:
-    python -m neural_network_optimization.scaling_law --out_dir nn_scaling_law_results
-
-    # Small test run:
-    python -m neural_network_optimization.scaling_law --small True --out_dir nn_scaling_law_small
+Writes CSVs + three figures to outputs/ and PCA artefacts for one canonical config.
 """
 
 import argparse
 import itertools
 import math
 import os
-import random
 import sys
 import time
-from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-from neural_network_optimization.model import (
-    phi_to_pulse_df,
-    get_weight_path,
-    DEFAULT_K,
-    DEFAULT_OMEGA_MHZ,
-    DELTA_CENTERS_MHZ,
-    N_PEAKS,
+from .constants import K_LIST, N_PEAKS, OMEGA_LIST
+from .data import sample_alpha
+from .inference import compute_fidelity, compute_runtime, load_model
+from .model import get_weight_path
+from .plotting import (
+    plot_matrix_element,
+    plot_runtime_vs_fidelity,
+    plot_scaling_law,
 )
-from neural_network_optimization.inference import (
-    load_model,
-    generate_pulse,
-    generate_phi,
-    compute_fidelity,
-    compute_runtime,
-)
-from neural_network_optimization.train import train
-
-from single_pulse_optimization_QSP.qsp_fit_x_rotation import str_to_bool
+from .train import train
 
 
 def run_scaling_law(
-    Omega_max_list,
-    K_list,
-    num_trials: int = 30,
-    training_steps: int = 10000,
-    out_dir: str = "nn_scaling_law_results",
+    Omega_list=OMEGA_LIST,
+    K_list=K_LIST,
+    n_eval_trials: int = 512,
+    epochs: int = 40,
+    n_train: int = 65_536,
+    n_eval: int = 1024,
+    batch_size: int = 512,
+    out_dir: str = "outputs",
+    weight_dir: str = "neural_network_optimization/weights",
+    device=None,
+    verbose: bool = True,
+    fidelity_sample_size: int = 2000,
+    seed: int = 0,
 ):
-    """Run the scaling law experiment with NN inference.
-
-    For each (Omega_max, K) pair:
-      1. Train model if no weights exist
-      2. Run num_trials with random alpha_vals
-      3. Record fidelity and runtime
-    """
     os.makedirs(out_dir, exist_ok=True)
-    data_dir = os.path.join(out_dir, "data")
-    os.makedirs(data_dir, exist_ok=True)
+    torch.manual_seed(seed)
 
-    fidelity_data = {
-        "Omega_max (MHz)": [],
-        "K": [],
-        "Runtime (us)": [],
-        "trial": [],
-        "Gate Fidelity": [],
-    }
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    total_configs = len(Omega_max_list) * len(K_list)
-    total_trials = total_configs * num_trials
+    rows = []
+    t_start = time.time()
 
-    print(f"Scaling law: {total_configs} model configs × {num_trials} trials = "
-          f"{total_trials} evaluations")
-    print(f"Omega_max: {Omega_max_list} MHz")
-    print(f"K: {K_list}")
-    print()
-
-    start_t = time.time()
-
-    for config_idx, (Omega_max, K) in enumerate(
-        itertools.product(Omega_max_list, K_list)
-    ):
-        print(f"\n{'='*60}")
-        print(f"Config {config_idx+1}/{total_configs}: "
-              f"Omega_max={Omega_max} MHz, K={K}")
-        print(f"{'='*60}")
-
-        # Step 1: Train or load model
-        weight_path = get_weight_path("neural_network_optimization", Omega_max, K)
-        if os.path.exists(weight_path):
-            print(f"  Loading existing weights from {weight_path}")
-            model = load_model(Omega_mhz=Omega_max, K=K)
+    for Omega, K in itertools.product(Omega_list, K_list):
+        if verbose:
+            print(f"\n=== Omega={Omega} MHz, K={K} ===")
+        if os.path.exists(get_weight_path(weight_dir, Omega, K)):
+            net = load_model(Omega=Omega, K=K, weight_dir=weight_dir, device=device)
         else:
-            print(f"  Training new model ({training_steps} steps)...")
-            model = train(
-                Omega_mhz=Omega_max,
-                K=K,
-                steps=training_steps,
-                verbose=True,
+            net = train(
+                Omega=Omega, K=K, epochs=epochs,
+                n_train=n_train, n_eval=n_eval, batch_size=batch_size,
+                weight_dir=weight_dir, device=device, verbose=verbose,
+                seed=seed,
             )
-            model.eval()
+            net.eval()
 
-        # Step 2: Run trials with random alpha_vals
-        print(f"  Running {num_trials} trials...")
-        trial_pbar = tqdm(range(num_trials), desc=f"  Trials Ω={Omega_max} K={K}")
+        # Shared sampled alphas across trials
+        alphas = sample_alpha(n_eval_trials, N_peaks=N_PEAKS).cpu().numpy()
 
-        for trial in trial_pbar:
-            # Random alpha_vals in [0, 2pi) for all peaks
-            alpha_list = (2 * torch.rand(N_PEAKS)).tolist()  # in units of pi
-            alpha_vals_rad = [a * math.pi for a in alpha_list]
+        it = range(n_eval_trials)
+        if verbose:
+            it = tqdm(it, desc=f"Ω={Omega} K={K} eval")
+        for trial in it:
+            a = alphas[trial].tolist()
+            fid = compute_fidelity(net, a, sample_size=fidelity_sample_size)
+            rt = compute_runtime(net, a)
+            row = {
+                "Omega_mhz": float(Omega), "K": int(K),
+                "trial": trial, "fidelity": float(fid), "runtime_us": float(rt),
+            }
+            for i, ai in enumerate(a):
+                row[f"alpha_{i}"] = float(ai)
+            rows.append(row)
 
-            # Save input config
-            config_tag = f"Omega_max{Omega_max}_K{K}_trial{trial + 1}"
-            input_df = pd.DataFrame({
-                "delta (MHz)": DELTA_CENTERS_MHZ,
-                "alpha (pi rad)": alpha_list,
-            })
-            input_df.to_csv(
-                os.path.join(data_dir, f"{config_tag}_input.csv"), index=False
-            )
+    full_df = pd.DataFrame(rows)
+    full_path = os.path.join(out_dir, "scaling_law_full.csv")
+    full_df.to_csv(full_path, index=False)
 
-            # Inference
-            fid = compute_fidelity(model, alpha_vals_rad)
-            runtime = compute_runtime(model, alpha_vals_rad)
+    summary = (
+        full_df.groupby(["Omega_mhz", "K"], sort=True)
+        .agg(
+            avg_fidelity=("fidelity", "mean"),
+            min_fidelity=("fidelity", "min"),
+            std_fidelity=("fidelity", "std"),
+            mean_runtime_us=("runtime_us", "mean"),
+            n_trials=("fidelity", "count"),
+        )
+        .reset_index()
+    )
+    summary_path = os.path.join(out_dir, "scaling_law_summary.csv")
+    summary.to_csv(summary_path, index=False)
 
-            # Save pulse CSV
-            pulse_df = generate_pulse(model, alpha_vals_rad)
-            pulse_df.to_csv(
-                os.path.join(data_dir, f"{config_tag}.csv"), index=False
-            )
+    plot_scaling_law(summary, os.path.join(out_dir, "scaling_law.png"))
+    plot_runtime_vs_fidelity(full_df, os.path.join(out_dir, "runtime_vs_fidelity.png"))
 
-            fidelity_data["Omega_max (MHz)"].append(Omega_max)
-            fidelity_data["K"].append(K)
-            fidelity_data["Runtime (us)"].append(runtime)
-            fidelity_data["trial"].append(trial + 1)
-            fidelity_data["Gate Fidelity"].append(fid)
+    # Canonical matrix-element figure: pick (80, 70) if available, else first combo.
+    (canon_omega, canon_K) = (80, 70) if (80 in Omega_list and 70 in K_list) else (Omega_list[0], K_list[0])
+    net = load_model(Omega=canon_omega, K=canon_K, weight_dir=weight_dir, device=device)
+    alpha_demo = [math.pi / 2, math.pi, math.pi / 3, 0.0][:N_PEAKS]
+    plot_matrix_element(
+        net, alpha_demo,
+        os.path.join(out_dir, f"matrix_element_Omega{canon_omega}_K{canon_K}.png"),
+    )
 
-            trial_pbar.set_postfix({"fid": f"{fid:.4f}", "rt_ns": f"{runtime*1e3:.1f}"})
+    # PCA for the canonical config across all peaks.
+    from .pca_analysis import run_pca_all_peaks
+    run_pca_all_peaks(
+        net, out_dir=os.path.join(out_dir, "pca", f"Omega{canon_omega}_K{canon_K}"),
+        n_samples=512,
+    )
 
-        # Print summary for this config
-        config_fids = [
-            fidelity_data["Gate Fidelity"][i]
-            for i in range(len(fidelity_data["Gate Fidelity"]))
-            if (fidelity_data["Omega_max (MHz)"][i] == Omega_max
-                and fidelity_data["K"][i] == K)
-        ]
-        print(f"  Mean fidelity: {np.mean(config_fids):.4f} "
-              f"± {np.std(config_fids):.4f}")
+    if verbose:
+        print(f"\nScaling law done in {time.time() - t_start:.1f}s.")
+        print(f"  full:    {full_path}")
+        print(f"  summary: {summary_path}")
+        print(summary.to_string(index=False))
 
-    # Save results
-    fidelity_df = pd.DataFrame(fidelity_data)
-    csv_path = os.path.join(out_dir, "nn_scaling_law_fidelity.csv")
-    fidelity_df.to_csv(csv_path, index=False)
-
-    elapsed = time.time() - start_t
-    print(f"\n{'='*60}")
-    print(f"Scaling law complete in {elapsed:.1f}s")
-    print(f"Results saved to {csv_path}")
-    print(f"{'='*60}")
-
-    return fidelity_df
+    return full_df, summary
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run NN-based scaling law experiments."
-    )
-    parser.add_argument("--out_dir", type=str, default="nn_scaling_law_results",
-                        help="Output directory for results.")
-    parser.add_argument("--small", type=str_to_bool, default=False,
-                        help="Run a small test case.")
-    parser.add_argument("--training_steps", type=int, default=10000,
-                        help="Training steps per model (if not already trained).")
-    parser.add_argument("--num_trials", type=int, default=30,
-                        help="Number of random trials per config.")
-    args = parser.parse_args()
-
-    torch.manual_seed(42)
-
-    Omega_max_list = [20, 40, 80]  # MHz
-    K_list = [30, 50, 70, 100]
-    num_trials = args.num_trials
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out_dir", type=str, default="outputs")
+    ap.add_argument("--weight_dir", type=str, default="neural_network_optimization/weights")
+    ap.add_argument("--n_eval_trials", type=int, default=512)
+    ap.add_argument("--epochs", type=int, default=40)
+    ap.add_argument("--fidelity_sample_size", type=int, default=2000)
+    ap.add_argument("--device", type=str, default=None)
+    ap.add_argument("--small", action="store_true",
+                    help="Tiny grid for smoke testing.")
+    args = ap.parse_args()
 
     if args.small:
-        Omega_max_list = [40, 80]
-        K_list = [50, 70]
-        num_trials = 4
-        args.out_dir = "nn_scaling_law_small"
+        omega_list = [40]
+        K_list = [8, 12]
+        n_trials = 4
+        epochs = 2
+        n_train = 512
+        n_eval = 128
+        batch_size = 64
+    else:
+        omega_list = OMEGA_LIST
+        K_list = K_LIST
+        n_trials = args.n_eval_trials
+        epochs = args.epochs
+        n_train = 65_536
+        n_eval = 1024
+        batch_size = 512
 
     run_scaling_law(
-        Omega_max_list=Omega_max_list,
-        K_list=K_list,
-        num_trials=num_trials,
-        training_steps=args.training_steps,
-        out_dir=args.out_dir,
+        Omega_list=omega_list, K_list=K_list,
+        n_eval_trials=n_trials, epochs=epochs,
+        n_train=n_train, n_eval=n_eval, batch_size=batch_size,
+        out_dir=args.out_dir, weight_dir=args.weight_dir,
+        device=args.device, fidelity_sample_size=args.fidelity_sample_size,
     )
 
 

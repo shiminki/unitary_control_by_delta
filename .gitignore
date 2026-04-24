@@ -1,6 +1,8 @@
 __pycache__
-.claude
+.DS_Store
 .pytest_cache
-neural_network_optimization
-nn_pulse_output
-pca_analysis_output*
+.claude
+
+# Generated artifacts — always reproducible from source.
+neural_network_optimization/weights/
+outputs/
