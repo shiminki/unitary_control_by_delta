@@ -122,6 +122,12 @@ fidelity = compute_fidelity(model, [math.pi/2, math.pi, math.pi/3, 0.0])
 
 ### Interactive demo
 
+Demo with single pulse GRAPE:
+
+```https://unitarycontrolbydelta-3vqnqcwxxnwdgwuuflhs4u.streamlit.app/```
+
+Demo with NN:
+
 ```bash
 streamlit run streamlit_app.py
 ```
