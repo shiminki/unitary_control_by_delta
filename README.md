@@ -132,6 +132,3 @@ and runtime, the `φ` bar plot, and the per-peak PCA decomposition with
 Fourier and polynomial fits.  The app never trains — if weights are missing
 it prints the command to generate them.
 
-## Reference
-
-Gradient-based QSP: [arXiv:2312.08426](https://arxiv.org/abs/2312.08426).
