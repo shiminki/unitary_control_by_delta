@@ -453,7 +453,7 @@ A reasonable `K` should be around 70.
 However, the streamlit server will take a while to run (~30 min), and we recommend to run this demo locally (~10 min).
 To do so, please follow the instruction below:
 
-1. Clone the repository: `git clone https://github.com/shiminki/unitary_control_by_delta.git`
+1. Clone the repository: `git clone -b gradient-based-qsp https://github.com/shiminki/unitary_control_by_delta.git`
 2. Enter the directory: `cd unitary_control_by_delta`
 3. Install the necessary requirements: `pip install -r requirements.txt`
 4. Run the streamlit app: `streamlit run streamlit_app.py`
