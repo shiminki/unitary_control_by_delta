@@ -174,3 +174,100 @@ def get_runtime_from_phi(phi, Omega_ang: float, Delta_0_ang: float) -> float:
 def get_weight_path(weight_dir: str, Omega_mhz: float, K: int) -> str:
     import os
     return os.path.join(weight_dir, f"joint_Omega{float(Omega_mhz)}_K{int(K)}.pt")
+
+
+def get_single_peak_weight_path(weight_dir: str, Omega_mhz: float, K: int, peak_index: int) -> str:
+    import os
+    return os.path.join(weight_dir, f"single_peak{peak_index}_Omega{float(Omega_mhz)}_K{int(K)}.pt")
+
+
+class SinglePeakNet(nn.Module):
+    """PulseNet variant that maps a single alpha to QSP phases for one peak.
+
+    Accepts (B, N_peaks) input (compatible with run_pca) but only uses
+    alpha[:, peak_index].  The remaining peaks receive alpha=0 during training,
+    so the produced phi implements R_z(alpha) at peak `peak_index` and R_z(0)=I
+    at all other peaks.
+
+    Fourier encoder covers only the one active alpha, giving a much smaller
+    input dimension (2*n_freq) compared to the full PulseNet (N_peaks*2*n_freq).
+    """
+
+    def __init__(
+        self,
+        Omega: float,
+        K: int,
+        peak_index: int = 0,
+        N_peaks: int = N_PEAKS,
+        hidden_dim: int = 512,
+        num_layers: int = 8,
+        n_freq: int = 8,
+        Delta_0_mhz: float = DELTA_0_MHZ,
+        robustness_window_mhz: float = ROBUSTNESS_WINDOW_MHZ,
+        delta_centers_mhz=None,
+    ):
+        super().__init__()
+        if delta_centers_mhz is None:
+            delta_centers_mhz = list(DELTA_CENTERS_MHZ)
+
+        self.Omega_mhz = float(Omega)
+        self.K = int(K)
+        self.N_peaks = int(N_peaks)
+        self.peak_index = int(peak_index)
+        self.n_freq = int(n_freq)
+        self.hidden_dim = int(hidden_dim)
+        self.num_layers = int(num_layers)
+        self.Delta_0_mhz = float(Delta_0_mhz)
+        self.robustness_window_mhz = float(robustness_window_mhz)
+        self.delta_centers_mhz = list(delta_centers_mhz)
+
+        self.Omega_ang = 2 * math.pi * self.Omega_mhz
+        self.Delta_0_ang = 2 * math.pi * self.Delta_0_mhz
+        self.robustness_window_ang = 2 * math.pi * self.robustness_window_mhz
+        self.delta_centers_ang = [2 * math.pi * d for d in self.delta_centers_mhz]
+
+        self.register_buffer("_Omega_mhz_t", torch.tensor(self.Omega_mhz, dtype=torch.float64))
+        self.register_buffer("_K_t", torch.tensor(self.K, dtype=torch.long))
+        self.register_buffer("_N_peaks_t", torch.tensor(self.N_peaks, dtype=torch.long))
+        self.register_buffer("_peak_index_t", torch.tensor(self.peak_index, dtype=torch.long))
+        self.register_buffer("_n_freq_t", torch.tensor(self.n_freq, dtype=torch.long))
+        self.register_buffer("_hidden_dim_t", torch.tensor(self.hidden_dim, dtype=torch.long))
+        self.register_buffer("_num_layers_t", torch.tensor(self.num_layers, dtype=torch.long))
+        self.register_buffer("_Delta_0_mhz_t", torch.tensor(self.Delta_0_mhz, dtype=torch.float64))
+        self.register_buffer("_robust_mhz_t", torch.tensor(self.robustness_window_mhz, dtype=torch.float64))
+        self.register_buffer("_delta_centers_mhz_t",
+                             torch.tensor(self.delta_centers_mhz, dtype=torch.float64))
+        self.register_buffer("_is_single_peak_t", torch.tensor(True))
+
+        in_dim = 2 * self.n_freq
+        layers = []
+        for _ in range(self.num_layers):
+            layers.append(nn.Linear(in_dim, self.hidden_dim, dtype=torch.float64))
+            layers.append(nn.SiLU())
+            in_dim = self.hidden_dim
+        layers.append(nn.Linear(self.hidden_dim, self.K + 1, dtype=torch.float64))
+        self.mlp = nn.Sequential(*layers)
+
+        with torch.no_grad():
+            self.mlp[-1].weight.mul_(0.01)
+            self.mlp[-1].bias.zero_()
+
+    def encode(self, alpha: torch.Tensor) -> torch.Tensor:
+        """Fourier features for alpha[:, peak_index] only."""
+        a = alpha[:, self.peak_index : self.peak_index + 1]  # (B, 1)
+        ks = torch.arange(1, self.n_freq + 1, dtype=alpha.dtype, device=alpha.device)
+        angles = a * ks / 2  # (B, n_freq)
+        return torch.cat([torch.cos(angles), torch.sin(angles)], dim=-1)  # (B, 2*n_freq)
+
+    def forward(self, alpha: torch.Tensor) -> torch.Tensor:
+        """(B, N_peaks) -> (B, K+1).  Only alpha[:, peak_index] is used."""
+        squeeze_out = False
+        if alpha.ndim == 1:
+            alpha = alpha.unsqueeze(0)
+            squeeze_out = True
+        alpha = alpha.to(dtype=torch.float64)
+        x = self.encode(alpha)
+        phi = self.mlp(x)
+        if squeeze_out:
+            phi = phi.squeeze(0)
+        return phi

@@ -7,7 +7,11 @@ import numpy as np
 import pandas as pd
 import torch
 
-from .model import PulseNet, get_weight_path, get_runtime_from_phi, phi_to_pulse_df
+from .model import (
+    PulseNet, SinglePeakNet,
+    get_weight_path, get_single_peak_weight_path,
+    get_runtime_from_phi, phi_to_pulse_df,
+)
 from .physics import fidelity_from_pulse
 
 
@@ -65,6 +69,58 @@ def load_model(
 
     net = PulseNet(
         Omega=Omega, K=K, N_peaks=N_peaks,
+        hidden_dim=hidden_dim, num_layers=num_layers, n_freq=n_freq,
+        Delta_0_mhz=Delta_0_mhz, robustness_window_mhz=robust_mhz,
+        delta_centers_mhz=delta_centers,
+    ).to(device)
+    net.load_state_dict(state)
+    net.eval()
+    return net
+
+
+def load_single_peak_model(
+    Omega: float,
+    K: int,
+    peak_index: int = 0,
+    weight_dir: str = "neural_network_optimization/weights",
+    device=None,
+) -> SinglePeakNet:
+    """Load a trained SinglePeakNet from disk.
+
+    Reads architectural buffers from the checkpoint so the returned model
+    exactly matches the one that was saved.
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+
+    path = get_single_peak_weight_path(weight_dir, Omega, K, peak_index)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"No weights at {path}.  Train first with:\n"
+            f"  python -m neural_network_optimization.train "
+            f"--Omega {Omega} --K {K} --single_peak --peak_index {peak_index}"
+        )
+    state = torch.load(path, map_location=device, weights_only=True)
+
+    def _buf(name, default):
+        return state[name].item() if name in state else default
+
+    N_peaks = int(_buf("_N_peaks_t", 4))
+    pk_idx = int(_buf("_peak_index_t", peak_index))
+    n_freq = int(_buf("_n_freq_t", 8))
+    hidden_dim = int(_buf("_hidden_dim_t", 512))
+    num_layers = int(_buf("_num_layers_t", 8))
+    Delta_0_mhz = float(_buf("_Delta_0_mhz_t", 200.0))
+    robust_mhz = float(_buf("_robust_mhz_t", 10.0))
+    if "_delta_centers_mhz_t" in state:
+        delta_centers = state["_delta_centers_mhz_t"].tolist()
+    else:
+        from .constants import DELTA_CENTERS_MHZ
+        delta_centers = list(DELTA_CENTERS_MHZ)
+
+    net = SinglePeakNet(
+        Omega=Omega, K=K, peak_index=pk_idx, N_peaks=N_peaks,
         hidden_dim=hidden_dim, num_layers=num_layers, n_freq=n_freq,
         Delta_0_mhz=Delta_0_mhz, robustness_window_mhz=robust_mhz,
         delta_centers_mhz=delta_centers,

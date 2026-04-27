@@ -16,8 +16,8 @@ import pandas as pd
 import torch
 
 from .constants import DEFAULT_K, N_PEAKS, OMEGA_MHZ
-from .inference import load_model
-from .model import PulseNet
+from .inference import load_model, load_single_peak_model
+from .model import PulseNet, SinglePeakNet
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -371,15 +371,53 @@ def main():
     ap.add_argument("--out_dir", type=str, default="outputs/pca")
     ap.add_argument("--n_samples", type=int, default=512)
     ap.add_argument("--device", type=str, default=None)
+    ap.add_argument("--single_peak", action="store_true",
+                    help="Run PCA on a SinglePeakNet instead of the full joint PulseNet.")
+    ap.add_argument("--peak_index", type=int, default=0,
+                    help="Which peak the SinglePeakNet targets (default: 0).")
+    ap.add_argument("--train_if_missing", action="store_true",
+                    help="Auto-train the model if no checkpoint is found.")
+    # Training hyper-params forwarded when --train_if_missing triggers training.
+    ap.add_argument("--epochs", type=int, default=40)
+    ap.add_argument("--lr", type=float, default=5e-3)
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    model = load_model(Omega=args.Omega, K=args.K, weight_dir=args.weight_dir, device=args.device)
-    run_pca_all_peaks(
-        model,
-        peak_indices=list(range(model.N_peaks)),
-        out_dir=os.path.join(args.out_dir, f"Omega{args.Omega}_K{args.K}"),
-        n_samples=args.n_samples,
-    )
+    if args.single_peak:
+        try:
+            model = load_single_peak_model(
+                Omega=args.Omega, K=args.K, peak_index=args.peak_index,
+                weight_dir=args.weight_dir, device=args.device,
+            )
+        except FileNotFoundError as exc:
+            if not args.train_if_missing:
+                raise
+            print(f"[pca_analysis] Checkpoint not found — training now.\n  ({exc})")
+            from .train import train_single_peak
+            model = train_single_peak(
+                Omega=args.Omega, K=args.K, peak_index=args.peak_index,
+                epochs=args.epochs, lr=args.lr, seed=args.seed,
+                weight_dir=args.weight_dir, device=args.device,
+            )
+
+        out_dir = os.path.join(
+            args.out_dir,
+            f"single_peak{args.peak_index}_Omega{args.Omega}_K{args.K}",
+        )
+        run_pca(
+            model,
+            peak_index=args.peak_index,
+            out_dir=out_dir,
+            n_samples=args.n_samples,
+        )
+    else:
+        model = load_model(Omega=args.Omega, K=args.K, weight_dir=args.weight_dir, device=args.device)
+        run_pca_all_peaks(
+            model,
+            peak_indices=list(range(model.N_peaks)),
+            out_dir=os.path.join(args.out_dir, f"Omega{args.Omega}_K{args.K}"),
+            n_samples=args.n_samples,
+        )
 
 
 if __name__ == "__main__":

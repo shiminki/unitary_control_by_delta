@@ -8,9 +8,9 @@ import time
 import torch
 from tqdm import tqdm
 
-from .constants import DEFAULT_K, OMEGA_MHZ
+from .constants import ALPHA_RANGE, DEFAULT_K, OMEGA_MHZ
 from .data import build_dataset
-from .model import PulseNet, get_weight_path
+from .model import PulseNet, SinglePeakNet, get_weight_path, get_single_peak_weight_path
 from .physics import build_qsp_unitary_batched
 
 
@@ -158,6 +158,112 @@ def train(
     return net
 
 
+def train_single_peak(
+    Omega: float,
+    K: int,
+    peak_index: int = 0,
+    *,
+    n_train: int = 65_536,
+    n_eval: int = 1024,
+    batch_size: int = 512,
+    epochs: int = 40,
+    lr: float = 5e-3,
+    samples_per_peak: int = 128,
+    weight_dir: str = "neural_network_optimization/weights",
+    device=None,
+    seed: int = 0,
+    verbose: bool = True,
+) -> "SinglePeakNet":
+    """Train a SinglePeakNet for one peak.
+
+    The model learns phi(alpha) such that the QSP unitary implements R_z(alpha)
+    at ``peak_index`` and R_z(0)=I at all other peaks.  The alpha vector fed to
+    the physics layer is always [0, ..., alpha, ..., 0] with alpha at position
+    ``peak_index``.
+    """
+    torch.manual_seed(int(seed))
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+
+    net = SinglePeakNet(Omega=Omega, K=K, peak_index=peak_index).to(device)
+
+    lo, hi = ALPHA_RANGE
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
+    alpha_train_1d = (torch.rand(n_train, dtype=torch.float64, generator=g) * (hi - lo) + lo).to(device)
+    alpha_eval_1d = (torch.rand(n_eval, dtype=torch.float64, generator=g) * (hi - lo) + lo).to(device)
+
+    def _make_alpha_batch(alpha_1d: torch.Tensor) -> torch.Tensor:
+        B = alpha_1d.shape[0]
+        ab = torch.zeros(B, net.N_peaks, dtype=torch.float64, device=device)
+        ab[:, peak_index] = alpha_1d
+        return ab
+
+    delta_all, peak_ids = presample_detunings(
+        net.delta_centers_ang, net.robustness_window_ang, net.Delta_0_ang,
+        samples_per_peak=samples_per_peak, device=device,
+    )
+
+    steps_per_epoch = max(1, n_train // batch_size)
+    total_steps = epochs * steps_per_epoch
+
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=total_steps)
+
+    best_state = None
+    best_eval = float("inf")
+
+    t0 = time.time()
+    it = range(1, epochs + 1)
+    if verbose:
+        it = tqdm(it, desc=f"SinglePeak Omega={Omega} K={K} peak={peak_index}")
+
+    for epoch in it:
+        net.train()
+        perm = torch.randperm(n_train, device=device)
+        for step in range(steps_per_epoch):
+            idx = perm[step * batch_size : (step + 1) * batch_size]
+            alpha_batch = _make_alpha_batch(alpha_train_1d[idx])
+            loss = _compute_loss(net, alpha_batch, delta_all, peak_ids)
+
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
+            opt.step()
+            sched.step()
+
+        net.eval()
+        with torch.no_grad():
+            eval_loss = 0.0
+            n_chunks = max(1, (n_eval + batch_size - 1) // batch_size)
+            for j in range(n_chunks):
+                a1d = alpha_eval_1d[j * batch_size : (j + 1) * batch_size]
+                if a1d.shape[0] == 0:
+                    continue
+                ab = _make_alpha_batch(a1d)
+                eval_loss += _compute_loss(net, ab, delta_all, peak_ids).item() * a1d.shape[0]
+            eval_loss /= max(1, n_eval)
+
+        if eval_loss < best_eval:
+            best_eval = eval_loss
+            best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
+
+        if verbose and hasattr(it, "set_postfix"):
+            it.set_postfix({"eval": f"{eval_loss:.3e}", "best": f"{best_eval:.3e}"})
+
+    if best_state is not None:
+        net.load_state_dict(best_state)
+
+    os.makedirs(weight_dir, exist_ok=True)
+    path = get_single_peak_weight_path(weight_dir, Omega, K, peak_index)
+    torch.save(net.state_dict(), path)
+    if verbose:
+        print(f"[train_single_peak] Omega={Omega} K={K} peak={peak_index} "
+              f"best_eval={best_eval:.3e} time={time.time()-t0:.1f}s -> {path}")
+    return net
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--Omega", type=float, default=OMEGA_MHZ)
@@ -170,13 +276,25 @@ def main():
     ap.add_argument("--weight_dir", type=str, default="neural_network_optimization/weights")
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--single_peak", action="store_true",
+                    help="Train SinglePeakNet instead of the full joint PulseNet.")
+    ap.add_argument("--peak_index", type=int, default=0,
+                    help="Which peak to target when --single_peak is set (default: 0).")
     args = ap.parse_args()
-    train(
-        Omega=args.Omega, K=args.K,
-        n_train=args.n_train, n_eval=args.n_eval,
-        batch_size=args.batch_size, epochs=args.epochs, lr=args.lr,
-        weight_dir=args.weight_dir, device=args.device, seed=args.seed,
-    )
+    if args.single_peak:
+        train_single_peak(
+            Omega=args.Omega, K=args.K, peak_index=args.peak_index,
+            n_train=args.n_train, n_eval=args.n_eval,
+            batch_size=args.batch_size, epochs=args.epochs, lr=args.lr,
+            weight_dir=args.weight_dir, device=args.device, seed=args.seed,
+        )
+    else:
+        train(
+            Omega=args.Omega, K=args.K,
+            n_train=args.n_train, n_eval=args.n_eval,
+            batch_size=args.batch_size, epochs=args.epochs, lr=args.lr,
+            weight_dir=args.weight_dir, device=args.device, seed=args.seed,
+        )
 
 
 if __name__ == "__main__":
