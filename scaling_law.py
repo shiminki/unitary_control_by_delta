@@ -159,7 +159,7 @@ def _run_nn_scaling(task):
         out_dir=run_dir,
         eval_interval=max(100, nn_steps // 20),
         checkpoint_interval=nn_steps,         # single checkpoint at the end
-        eval_configs=128,
+        eval_configs=2048,
     )
     # train_nn verbose kwarg controls tqdm;
     model, _, eval_records = train_nn(cfg_nn, verbose=True)
@@ -239,10 +239,11 @@ def main():
                            help="Skip the classical per-instance QSP trials.")
     argparser.add_argument("--skip_nn", type=str_to_bool, default=False,
                            help="Skip the neural-network scaling law.")
-    argparser.add_argument("--nn_steps", type=int, default=5_000,
+    argparser.add_argument("--nn_steps", type=int, default=10_000,
                            help="Training steps per NN model.")
-    argparser.add_argument("--nn_batch_size", type=int, default=64)
-    argparser.add_argument("--nn_sample_size", type=int, default=256,
+    argparser.add_argument("--nn_batch_size", type=int, default=4096,
+                           help="α configs per gradient step. 4096 saturates A100 80GB for all K.")
+    argparser.add_argument("--nn_sample_size", type=int, default=512,
                            help="δ samples per α config per NN step.")
     argparser.add_argument("--num_trials", type=int, default=30,
                            help="Classical trials per (Omega, K) combination.")

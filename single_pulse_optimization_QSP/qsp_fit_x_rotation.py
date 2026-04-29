@@ -35,9 +35,9 @@ __all__ = [
     "TrainConfig", "train", "fidelity", "fidelity_from_pulse",
     "convert_old_pulse_to_new",
     "plot_matrix_element_vs_delta",
-    "get_control_runtime", "build_qsp_unitary", "delta_to_theta",
-    "theta_to_delta", "signal_operator", "Rz", "bmm", "DirectPhases",
-    "str_to_bool",
+    "get_control_runtime", "build_qsp_unitary", "build_qsp_unitary_batched",
+    "delta_to_theta", "theta_to_delta", "signal_operator", "Rz", "bmm",
+    "DirectPhases", "str_to_bool",
 ]
 
 
@@ -226,6 +226,73 @@ def build_qsp_unitary(
         U = apply_control_operator(U, phi[j + 1], delta)
 
     return U
+
+
+def build_qsp_unitary_batched(
+    phi_batch: torch.Tensor,   # (B, K+1)
+    delta_batch: torch.Tensor, # (B, S)
+    Delta_0: float,
+    Omega: float,
+) -> torch.Tensor:
+    """
+    Fully-vectorized QSP unitary builder for a batch of independent phase sequences.
+
+    Equivalent to stacking [build_qsp_unitary(phi_batch[b], delta_batch[b], ...)]
+    over b=0..B-1, but computed in a single GPU kernel pass rather than a Python
+    for-loop — critical for A100 utilization when B is large.
+
+    Parameters
+    ----------
+    phi_batch   : (B, K+1) – one phase sequence per batch item
+    delta_batch : (B, S)   – detuning samples, one set per batch item
+    Delta_0     : maximum detuning range (rad/μs)
+    Omega       : Rabi frequency (rad/μs)
+
+    Returns
+    -------
+    (B, S, 2, 2) complex128 unitary tensors
+    """
+    B, K_plus_1 = phi_batch.shape
+    _, S = delta_batch.shape
+    K = K_plus_1 - 1
+    dev = phi_batch.device
+
+    theta = delta_to_theta(delta_batch, Delta_0)  # (B, S)
+
+    # Build signal operator W for all (B, S) detuning samples at once
+    c = torch.cos(theta / 2)  # (B, S)
+    s = torch.sin(theta / 2)  # (B, S)
+    W = torch.zeros(B, S, 2, 2, dtype=torch.complex128, device=dev)
+    W[:, :, 0, 0] = c
+    W[:, :, 1, 1] = c
+    W[:, :, 0, 1] = -1j * s
+    W[:, :, 1, 0] = -1j * s
+
+    def ctrl(Ucur: torch.Tensor, k: int) -> torch.Tensor:
+        # phi_batch[:, k]: (B,) — one phase per batch item
+        # delta_batch:     (B, S) — S detuning samples per batch item
+        p = phi_batch[:, k, None].expand(B, S)       # (B, S) broadcast
+        norm = torch.sqrt(Omega ** 2 + delta_batch ** 2)  # (B, S)
+        lam = p.abs() / (2.0 * Omega) * norm             # (B, S)
+        sgn = p.sign()                                    # (B, S)
+        cos_l = torch.cos(lam)
+        sin_l = torch.sin(lam)
+        sin_diag   = sin_l * sgn * Omega / norm           # (B, S)
+        sin_offdiag = sin_l * delta_batch / norm          # (B, S)
+        R = torch.zeros(B, S, 2, 2, dtype=torch.complex128, device=dev)
+        R[:, :, 0, 0] = cos_l - 1j * sin_diag
+        R[:, :, 1, 1] = cos_l + 1j * sin_diag
+        R[:, :, 0, 1] = -1j * sin_offdiag
+        R[:, :, 1, 0] = -1j * sin_offdiag
+        return torch.matmul(R, Ucur)  # (B, S, 2, 2)
+
+    U = torch.eye(2, dtype=torch.complex128, device=dev).expand(B, S, 2, 2).clone()
+    U = ctrl(U, 0)
+    for j in range(K):
+        U = torch.matmul(W, U)
+        U = ctrl(U, j + 1)
+
+    return U  # (B, S, 2, 2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

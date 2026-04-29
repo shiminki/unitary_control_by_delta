@@ -55,7 +55,7 @@ from tqdm import tqdm
 
 from single_pulse_optimization_QSP.qsp_fit_x_rotation import (
     TrainConfig,
-    build_qsp_unitary,
+    build_qsp_unitary_batched,
     fidelity,
     plot_matrix_element_vs_delta,
 )
@@ -261,38 +261,6 @@ def _sample_alpha_configs(
     return alphas
 
 
-def _single_phi_loss(
-    phi:         torch.Tensor,   # (K+1,)
-    delta:       torch.Tensor,   # (S,)
-    alpha:       torch.Tensor,   # (S,)
-    Delta_0:     float,
-    Omega_max:   float,
-    lambda_grad: float = 0.0,
-) -> torch.Tensor:
-    """
-    Differentiable MSE loss for one phase vector.
-
-    Compares U[0,0] of build_qsp_unitary(φ, δ) against the target
-    cos(α/2) − i·sin(α/2), which is the (0,0) element of R_z(α).
-
-    Optionally adds a finite-difference gradient penalty on U[0,0] w.r.t. δ
-    to encourage smooth, flat responses inside each robustness window.
-    """
-    U    = build_qsp_unitary(phi, delta, Delta_0, Omega_max)
-    pred = U[:, 0, 0]                                           # (S,) complex
-    tgt  = (torch.cos(alpha / 2) - 1j * torch.sin(alpha / 2)).to(torch.complex128)
-    err  = (pred - tgt).abs() ** 2                              # (S,) real
-
-    if lambda_grad > 0.0:
-        eps   = 1e-2
-        U_p   = build_qsp_unitary(phi, delta + eps, Delta_0, Omega_max)
-        U_m   = build_qsp_unitary(phi, delta - eps, Delta_0, Omega_max)
-        d_pred = (U_p[:, 0, 0] - U_m[:, 0, 0]) / (2.0 * eps)
-        err   = err + lambda_grad * d_pred.abs() ** 2
-
-    return err.mean()
-
-
 def batch_qsp_loss(
     phi_batch:   torch.Tensor,   # (B, K+1)
     delta_s:     torch.Tensor,   # (B, S)
@@ -301,16 +269,25 @@ def batch_qsp_loss(
     Omega_max:   float,
     lambda_grad: float = 0.0,
 ) -> torch.Tensor:
-    """Average QSP loss over a batch of independently predicted phase vectors."""
-    B = phi_batch.shape[0]
-    losses = torch.stack([
-        _single_phi_loss(
-            phi_batch[b], delta_s[b], alpha_t[b],
-            Delta_0, Omega_max, lambda_grad,
-        )
-        for b in range(B)
-    ])
-    return losses.mean()
+    """
+    Vectorized QSP loss over a batch of independently predicted phase vectors.
+
+    Uses build_qsp_unitary_batched to process all B items in a single GPU pass
+    (shape: B×S simultaneous 2×2 matmuls) instead of a Python for-loop.
+    """
+    U    = build_qsp_unitary_batched(phi_batch, delta_s, Delta_0, Omega_max)  # (B, S, 2, 2)
+    pred = U[:, :, 0, 0]                                                       # (B, S) complex
+    tgt  = (torch.cos(alpha_t / 2) - 1j * torch.sin(alpha_t / 2)).to(torch.complex128)
+    err  = (pred - tgt).abs() ** 2                                             # (B, S) real
+
+    if lambda_grad > 0.0:
+        eps    = 1e-2
+        U_p    = build_qsp_unitary_batched(phi_batch, delta_s + eps, Delta_0, Omega_max)
+        U_m    = build_qsp_unitary_batched(phi_batch, delta_s - eps, Delta_0, Omega_max)
+        d_pred = (U_p[:, :, 0, 0] - U_m[:, :, 0, 0]) / (2.0 * eps)
+        err    = err + lambda_grad * d_pred.abs() ** 2
+
+    return err.mean()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
