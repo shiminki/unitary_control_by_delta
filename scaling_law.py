@@ -14,7 +14,7 @@ import time
 import math
 import numpy as np
 
-from neural_network_optimization_QSP import NNTrainConfig, train_nn, predict_phi
+from neural_network_optimization_QSP import NNTrainConfig, QSPPhaseNet, train_nn, predict_phi
 
 
 def get_min_distance(Delta_0, sigma, delta_vals):
@@ -161,19 +161,28 @@ def _run_nn_scaling(task):
         checkpoint_interval=nn_steps,         # single checkpoint at the end
         eval_configs=2048,
     )
-    # train_nn verbose kwarg controls tqdm;
-    model, _, eval_records = train_nn(cfg_nn, verbose=True)
 
-    best_eval  = min(e for _, e in eval_records) if eval_records else float("nan")
-    final_eval = eval_records[-1][1]            if eval_records else float("nan")
+    model_path = os.path.join(run_dir, "model_final.pt")
+    if os.path.exists(model_path):
+        print(f"  [cache hit] loading existing model from {model_path}")
+        model = QSPPhaseNet(N=N, K=K).to(device).double()
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        best_eval  = float("nan")
+        final_eval = float("nan")
+    else:
+        model, _, eval_records = train_nn(cfg_nn, verbose=True)
+        best_eval  = min(e for _, e in eval_records) if eval_records else float("nan")
+        final_eval = eval_records[-1][1]            if eval_records else float("nan")
 
     # ── fidelity on held-out test set ─────────────────────────────────────────
+    # phi, delta_vals_t, and alpha_i are all on CPU, so cfg_qsp must use "cpu"
+    # regardless of the training device to avoid cross-device index errors.
     cfg_qsp = TrainConfig(
         Omega_max=cfg_nn.Omega_max,
         Delta_0=cfg_nn.Delta_0,
         robustness_window=cfg_nn.robustness_window,
         K=K,
-        device=device,
+        device="cpu",
     )
     delta_vals_t = torch.tensor(cfg_nn.delta_vals, dtype=torch.float64)
 
@@ -183,7 +192,7 @@ def _run_nn_scaling(task):
     fidelities = []
     for alpha_i in test_alphas:
         phi = predict_phi(model, alpha_i, device=device).detach().cpu()
-        fid = fidelity(phi, delta_vals_t, alpha_i, cfg_qsp)
+        fid = fidelity(phi, delta_vals_t.cpu(), alpha_i.cpu(), cfg_qsp)
         fidelities.append(fid)
 
     avg_fid = float(np.mean(fidelities))
