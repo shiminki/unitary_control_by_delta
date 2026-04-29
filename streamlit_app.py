@@ -20,6 +20,10 @@ from single_pulse_optimization_QSP.qsp_fit_x_rotation import (
 
 from util import get_ore_ple_error_distribution, plot_pulse_param
 
+from neural_network_optimization_QSP import (
+    NNTrainConfig, train_nn, predict_phi, visualize_predictions,
+)
+
 try:
     from util import animate_multi_error_bloch
     _HAS_QUTIP = True
@@ -310,16 +314,17 @@ def _qsp_simulate_bloch(phi: torch.Tensor, delta_val: float,
 
     # Iterate phi in forward order: phi[0] is applied first to psi_init, phi[K] last.
     # Sequence: R_x(phi[K];δ) R_z(θ) ... R_z(θ) R_x(phi[0];δ) |psi_init>
-    # R_x(phi; δ) = exp(-i/2 · (Ω σ_x + δ σ_z) · t),  t = phi/Ω
+    # R_x(phi; δ) = exp(-i/2 · (sgn(phi) * Ω σ_x + δ σ_z) · t),  t = |phi|/Ω
     for j, pv in enumerate(phi.tolist()):
-        lamb = pv * norm / (2.0 * Omega)
+        lamb = abs(pv) * norm / (2.0 * Omega)   # θ = norm·|phi|/(2Ω)
         c, s = math.cos(lamb), math.sin(lamb)
+        sign_pv = math.copysign(1.0, pv)
 
-        # exp(-i/2·(Ω σ_x + δ σ_z)·t) with lamb = norm·t/2
+        # exp(-i/2·(sgn(phi)·Ω σ_x + δ σ_z)·t) with lamb = norm·|phi|/(2Ω)
         U_rx = torch.zeros((2, 2), dtype=torch.complex128)
         U_rx[0, 0] = complex(c, -s * delta_val / norm)
-        U_rx[0, 1] = complex(0.0, -s * Omega / norm)
-        U_rx[1, 0] = complex(0.0, -s * Omega / norm)
+        U_rx[0, 1] = complex(0.0, -s * sign_pv * Omega / norm)
+        U_rx[1, 0] = complex(0.0, -s * sign_pv * Omega / norm)
         U_rx[1, 1] = complex(c, +s * delta_val / norm)
         psi = U_rx @ psi
         bloch_vecs.append(_spinor_to_bloch(psi))
@@ -332,6 +337,8 @@ def _qsp_simulate_bloch(phi: torch.Tensor, delta_val: float,
             bloch_vecs.append(_spinor_to_bloch(psi))
             # W rotation-angle equivalent: Omega * tau_W
             pulse_info.append((0, 0.0, tau_W * Omega))
+    
+    print(f"Delta {delta_val/(2*math.pi):.1f} MHz: Final Bloch vector {bloch_vecs[-1]}")
 
     return np.array(bloch_vecs), pulse_info
 
@@ -358,7 +365,7 @@ def qsp_bloch_animation(phi: torch.Tensor, cfg: TrainConfig,
     # Build the 3*N detuning list: [δ₀−σ, δ₀, δ₀+σ, δ₁−σ, δ₁, δ₁+σ, …]
     sim_deltas: List[float] = []
     for dv in dv_cpu.tolist():
-        sim_deltas.extend([dv - sigma, dv, dv + sigma])
+        sim_deltas.extend([dv - sigma / 2, dv, dv + sigma / 2])
 
     # Clamp to the valid detuning range
     sim_deltas = [
@@ -392,15 +399,19 @@ def qsp_bloch_animation(phi: torch.Tensor, cfg: TrainConfig,
         g = idx // 3          # which target peak
         av = av_cpu[g].item()
         target_str = f"Rx({av / math.pi:.3f}\u03c0)"
+        # label_list.append(
+        #     f"delta = {d_MHz:.1f} MHz, F = {fid_list[idx]:.4f}, target = {target_str}"
+        # )
         label_list.append(
-            f"delta = {d_MHz:.1f} MHz, F = {fid_list[idx]:.4f}, target = {target_str}"
+            f"delta = {d_MHz:.1f} MHz"
         )
 
     N = len(dv_cpu)
-    title = (
-        f"QSP Ensemble Bloch Evolution — {N} peaks × 3 qubits "
-        f"(δ, δ±σ={sigma_MHz:.1f} MHz)"
-    )
+    # title = (
+    #     f"QSP Ensemble Bloch Evolution — {N} peaks × 3 qubits "
+    #     f"(δ, δ±σ={sigma_MHz:.1f} MHz)"
+    # )
+    title = ""
     animate_multi_error_bloch(
         bloch_list, pinfo_list, fid_list,
         delta_MHz_labels, epsilon_list,
@@ -851,3 +862,216 @@ if st.session_state["results"] is not None:
                         mime="video/mp4",
                         key="download_bloch",
                     )
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Neural Network QSP
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("Neural Network QSP Phase Prediction")
+st.markdown(r"""
+Train a neural network that **instantly predicts** QSP phase vectors $\phi$ for
+any target rotation configuration $[\alpha_0, \ldots, \alpha_{N-1}]$ — without
+running a full per-instance optimisation.
+
+The network input is the cos/sin half-angle encoding
+$[\cos(\alpha_i/2),\, \sin(\alpha_i/2)]_{i=0}^{N-1}$
+and the output is $\phi \in \mathbb{R}^{K+1}$.
+It shares $K$, $\Omega_\mathrm{max}$, $\Delta_0$, $\sigma$, and
+$\delta$-peak locations with the main optimisation above.
+
+**peak_index** restricts training to a single varying peak:
+$\alpha_\text{peak\_index}$ is drawn uniformly from $[\alpha_\text{lo},\,\alpha_\text{hi}]$
+while all other $\alpha_j = 0$.  This reduces the problem to 1-D function
+approximation and typically converges faster.
+""")
+
+# ── NN configuration ──────────────────────────────────────────────────────────
+
+col_nn1, col_nn2 = st.columns(2)
+
+with col_nn1:
+    nn_steps       = st.number_input("NN training steps", min_value=100,
+                                      value=5_000, step=500, key="nn_steps")
+    nn_batch_size  = st.number_input("Batch size (α configs / step)", min_value=1,
+                                      value=64, step=8, key="nn_bs")
+    nn_sample_size = st.number_input("δ samples per α config", min_value=16,
+                                      value=256, step=16, key="nn_ss")
+    nn_lr          = st.number_input("Learning rate", min_value=0.0, value=1e-3,
+                                      step=1e-4, format="%.6f", key="nn_lr")
+
+with col_nn2:
+    nn_peak_options = ["None (all peaks vary)"] + [str(i) for i in range(int(N))]
+    nn_peak_sel     = st.selectbox("peak_index", options=nn_peak_options, key="nn_peak",
+                                    help="Restrict training to one varying peak; others fixed to 0.")
+    nn_peak_index   = None if nn_peak_sel.startswith("None") else int(nn_peak_sel)
+    nn_out_dir      = st.text_input("NN output directory", value="nn_qsp_output", key="nn_out")
+    nn_eval_int     = st.number_input("Eval interval (steps)", min_value=10,
+                                       value=500, step=100, key="nn_eval_int")
+
+nn_train_btn = st.button("Train Neural Network", key="btn_nn_train")
+
+if "nn_results" not in st.session_state:
+    st.session_state["nn_results"] = None
+
+# ── Training ──────────────────────────────────────────────────────────────────
+
+if nn_train_btn:
+    delta_val_nn, delta_err_nn = parse_float_list(delta_list_scaled)
+    nn_errs = []
+    if delta_err_nn:
+        nn_errs.append(f"delta_vals: {delta_err_nn}")
+    elif len(delta_val_nn) != int(N):
+        nn_errs.append(f"delta_vals length {len(delta_val_nn)} ≠ N={int(N)}")
+
+    if nn_errs:
+        for e in nn_errs:
+            st.error(e)
+    else:
+        _nn_device = device
+        if _nn_device == "cuda" and not torch.cuda.is_available():
+            _nn_device = "cpu"
+
+        nn_cfg = NNTrainConfig(
+            K=int(K),
+            N=int(N),
+            Omega_max=2 * math.pi * float(Omega_max_mhz),
+            Delta_0=2 * math.pi * float(Delta_0_mhz),
+            robustness_window=2 * math.pi * float(robustness_window_mhz),
+            delta_vals=[2 * math.pi * d for d in delta_val_nn],
+            batch_size=int(nn_batch_size),
+            steps=int(nn_steps),
+            lr=float(nn_lr),
+            sample_size=int(nn_sample_size),
+            eval_interval=int(nn_eval_int),
+            checkpoint_interval=int(nn_steps),  # checkpoint only at end
+            peak_index=nn_peak_index,
+            device=_nn_device,
+            out_dir=nn_out_dir,
+        )
+
+        with st.spinner("Training neural network…"):
+            _nn_pbar  = st.progress(0)
+            _nn_ptext = st.empty()
+
+            def _nn_progress_cb(step: int, total: int, loss: float, eta: float) -> None:
+                _nn_pbar.progress(step / total)
+                _eta_min, _eta_sec = int(eta // 60), int(eta % 60)
+                _nn_ptext.write(
+                    f"Step {step}/{total} — loss {loss:.3e} "
+                    f"— ETA {_eta_min:02d}:{_eta_sec:02d}"
+                )
+
+            nn_model, nn_train_losses, nn_eval_records = train_nn(
+                nn_cfg, progress_cb=_nn_progress_cb, verbose=False
+            )
+
+        final_nn_eval = nn_eval_records[-1][1] if nn_eval_records else float("nan")
+        st.success(f"NN training complete. Final eval loss: {final_nn_eval:.4e}")
+
+        _curve_path = os.path.join(nn_out_dir, "training_curve.png")
+        if os.path.exists(_curve_path):
+            st.image(_curve_path, caption="Training loss curve", use_column_width=True)
+
+        st.session_state["nn_results"] = {
+            "model":          nn_model,
+            "cfg":            nn_cfg,
+            "delta_vals_mhz": delta_val_nn,
+        }
+        st.session_state["nn_pred_viz"] = {}
+
+# ── Prediction panel ──────────────────────────────────────────────────────────
+
+if st.session_state["nn_results"] is not None:
+    nn_res          = st.session_state["nn_results"]
+    nn_model_stored = nn_res["model"]
+    nn_cfg_stored   = nn_res["cfg"]
+
+    if "nn_pred_viz" not in st.session_state:
+        st.session_state["nn_pred_viz"] = {}
+
+    st.subheader("Predict φ for a New α Configuration")
+
+    _nn_peak = nn_cfg_stored.peak_index
+    if _nn_peak is not None:
+        st.info(
+            f"Model trained with **peak_index = {_nn_peak}**: only "
+            f"α_{_nn_peak} varies during training.  Enter any value for "
+            f"α_{_nn_peak} below; other peaks will be zeroed automatically."
+        )
+
+    _nn_alpha_default = ", ".join(["0"] * nn_cfg_stored.N)
+    nn_alpha_input = st.text_area(
+        f"α values (units of π, length N={nn_cfg_stored.N})",
+        value=_nn_alpha_default,
+        height=68,
+        key="nn_alpha_input",
+        help="Separate with commas. E.g. '0.5, 1, 0.3, 1.25' means "
+             "α = [π/2, π, 0.3π, 1.25π].",
+    )
+
+    nn_predict_btn = st.button("Predict φ and Evaluate", key="btn_nn_predict")
+
+    if nn_predict_btn:
+        alpha_pred_scaled, alpha_pred_err = parse_float_list(nn_alpha_input)
+        if alpha_pred_err:
+            st.error(f"Parsing error: {alpha_pred_err}")
+        elif len(alpha_pred_scaled) != nn_cfg_stored.N:
+            st.error(
+                f"Expected {nn_cfg_stored.N} α values, got {len(alpha_pred_scaled)}."
+            )
+        else:
+            alpha_pred_rad = (
+                torch.tensor(alpha_pred_scaled, dtype=torch.float64) * math.pi
+            )
+
+            # Zero out all non-trained peaks when peak_index mode is active
+            if _nn_peak is not None:
+                mask = torch.zeros(nn_cfg_stored.N, dtype=torch.float64)
+                mask[_nn_peak] = 1.0
+                alpha_pred_rad = alpha_pred_rad * mask
+
+            with st.spinner("Predicting φ…"):
+                phi_pred = predict_phi(
+                    nn_model_stored, alpha_pred_rad, device=nn_cfg_stored.device
+                ).detach().cpu()
+
+            st.write(f"**Predicted φ** — {len(phi_pred)} phases (K+1 = {nn_cfg_stored.K + 1})")
+            phi_df_nn = pd.DataFrame({
+                "index": list(range(len(phi_pred))),
+                "phi":   phi_pred.numpy().tolist(),
+            })
+            st.dataframe(phi_df_nn, use_container_width=True)
+            st.download_button(
+                "Download predicted φ (CSV)",
+                data=phi_df_nn.to_csv(index=False).encode("utf-8"),
+                file_name="nn_predicted_phi.csv",
+                mime="text/csv",
+                key="download_nn_phi",
+            )
+
+            # Fidelity + matrix element plot
+            _nn_plot_path = os.path.join(nn_cfg_stored.out_dir, "nn_matrix_element.png")
+            _cfg_qsp_nn = TrainConfig(
+                Omega_max=nn_cfg_stored.Omega_max,
+                Delta_0=nn_cfg_stored.Delta_0,
+                robustness_window=nn_cfg_stored.robustness_window,
+                K=nn_cfg_stored.K,
+                device="cpu",
+            )
+            _delta_t_nn = torch.tensor(nn_cfg_stored.delta_vals, dtype=torch.float64)
+
+            with st.spinner("Computing fidelity and generating plot…"):
+                fid_nn = visualize_predictions(
+                    nn_model_stored, alpha_pred_rad, _delta_t_nn,
+                    _cfg_qsp_nn, _nn_plot_path, device="cpu",
+                )
+
+            st.metric("Gate Fidelity (NN-predicted φ)", f"{fid_nn:.6f}")
+
+            if os.path.exists(_nn_plot_path):
+                st.image(_nn_plot_path,
+                         caption="Matrix element vs δ (NN-predicted φ)",
+                         use_column_width=True)
+
+            st.session_state["nn_pred_viz"]["last_fidelity"] = fid_nn
