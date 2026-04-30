@@ -481,6 +481,9 @@ def _fidelity_contour_ax(ax, phi, cfg, delta_i, alpha_i):
     for j, eps in enumerate(eps_vals):
         F_grid[:, j] = _gate_fidelity_batch(
             phi, delta_range, alpha_i, cfg, 1.0 + eps).numpy()
+        
+    F_avg = F_grid.mean()
+    print(f"  → avg fidelity over contour = {F_avg:.4f}", flush=True)
 
     delta_mhz   = delta_range.numpy() / (2 * math.pi)
     eps_pct     = eps_vals * 100
