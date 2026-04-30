@@ -391,7 +391,7 @@ def train_nn(
         )
         return batch_qsp_loss(
             phi_batch, delta_s, alpha_t, cfg.Delta_0, cfg.Omega_max,
-            lambda_grad=0.0,
+            lambda_grad=cfg.lambda_grad,
         ).item()
 
     # ── main loop ─────────────────────────────────────────────────────────────

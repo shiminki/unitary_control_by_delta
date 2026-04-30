@@ -1,16 +1,14 @@
 from single_pulse_optimization_QSP.qsp_fit_x_rotation import *
+from single_pulse_optimization_QSP.qsp_fit_x_rotation import LAMBDA_VAL
 
 import itertools
 import random
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import torch
+import torch.nn as nn
 import pandas as pd
 import argparse
-import multiprocessing as mp
-from datetime import datetime, timedelta
-import time
 import math
 import numpy as np
 
@@ -46,81 +44,139 @@ def generate_delta_alpha_pairs(N, Delta_0, signal_window, random_delta=True):
     return delta_list, alpha_list
 
 
-def _run_single_trial(task):
-    Omega_max, K, trial, out_dir = task
+def _run_classical_batch(
+    Omega_max: float,
+    K: int,
+    num_trials: int,
+    out_dir: str,
+    sample_size: int = 2048,
+    steps: int = 8000,
+    lr: float = 5e-2,
+    device: str = "cpu",
+) -> list:
+    """
+    Train `num_trials` independent QSP phase sequences in parallel on `device`.
 
-    # Parameters based on hBN sample
-    Delta_0_mhz = 200.0  # MHz
-    robustness_window_mhz = 10.0  # MHz
+    All trials share the same fixed delta_vals but get independent random alpha
+    configs.  A single (num_trials, K+1) nn.Parameter is optimised with one Adam
+    step per iteration; per-trial gradients are independent because the batch loss
+    is the *sum* of per-trial losses.
+    """
+    Delta_0_mhz           = 200.0
+    robustness_window_mhz = 10.0
+    delta_list_mhz        = [-100.0, -32.0, 32.0, 100.0]
+    N                     = 4
+    B                     = num_trials
 
-    cfg = TrainConfig(
-        Omega_max=2 * math.pi * Omega_max,
-        Delta_0=2 * math.pi * Delta_0_mhz,
-        robustness_window=2 * math.pi * robustness_window_mhz,
-        K=int(K),
-        out_dir=os.path.join(out_dir, "data"),
+    Delta_0           = 2 * math.pi * Delta_0_mhz
+    Omega             = 2 * math.pi * Omega_max
+    robustness_window = 2 * math.pi * robustness_window_mhz
+
+    dev = torch.device(device)
+
+    delta_vals = torch.tensor(delta_list_mhz, dtype=torch.float64, device=dev) * 2 * math.pi  # (N,)
+
+    # Each trial gets its own random alpha config in [0, 2π) rad
+    alpha_vals_batch = 2 * math.pi * torch.rand(B, N, dtype=torch.float64, device=dev)  # (B, N)
+
+    # Sample training points once (same convention as train() in qsp_fit_x_rotation.py).
+    # Peaks are well-separated (min gap 64 MHz >> 2×sigma=20 MHz) so nearest-peak
+    # lookup reduces to direct index lookup.
+    idx          = torch.randint(0, N, (B, sample_size), device=dev)          # (B, S)
+    centers      = delta_vals[idx]                                             # (B, S)
+    jitter       = (2.0 * torch.rand(B, sample_size, dtype=torch.float64, device=dev) - 1.0) * robustness_window
+    delta_sample = (centers + jitter).clamp(-Delta_0, Delta_0)                # (B, S)
+    alpha_sample = alpha_vals_batch[torch.arange(B, device=dev).unsqueeze(1), idx]  # (B, S)
+
+    # (B, K+1) batched parameter — one phase sequence per trial
+    phi_batch = nn.Parameter(0.01 * torch.randn(B, K + 1, dtype=torch.float64, device=dev))
+    opt   = torch.optim.Adam([phi_batch], lr=lr)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps)
+
+    best_loss = torch.full((B,), float("inf"), dtype=torch.float64)
+    best_phi  = torch.zeros(B, K + 1, dtype=torch.float64)
+
+    target_u00 = (torch.cos(alpha_sample / 2) - 1j * torch.sin(alpha_sample / 2)).to(torch.complex128)
+
+    with tqdm(total=steps, desc=f"  Omega={Omega_max} MHz  K={K}", dynamic_ncols=True, leave=False) as pbar:
+        for _ in range(steps):
+            U    = build_qsp_unitary_batched(phi_batch, delta_sample, Delta_0, Omega)  # (B, S, 2, 2)
+            pred = U[:, :, 0, 0]                                                        # (B, S) complex
+
+            fd_eps = 1e-2
+            U_p        = build_qsp_unitary_batched(phi_batch, delta_sample + fd_eps, Delta_0, Omega)
+            U_m        = build_qsp_unitary_batched(phi_batch, delta_sample - fd_eps, Delta_0, Omega)
+            grad_pred  = (U_p[:, :, 0, 0] - U_m[:, :, 0, 0]) / (2 * fd_eps)
+
+            err            = pred - target_u00
+            loss_per_trial = (err.abs() ** 2 + LAMBDA_VAL * grad_pred.abs() ** 2).mean(dim=1)  # (B,)
+            loss           = loss_per_trial.sum()
+
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_([phi_batch], max_norm=10.0)
+            opt.step()
+            sched.step()
+
+            with torch.no_grad():
+                improved = loss_per_trial.detach().cpu() < best_loss
+                if improved.any():
+                    best_loss[improved] = loss_per_trial.detach().cpu()[improved]
+                    best_phi[improved]  = phi_batch.detach().cpu()[improved]
+
+            pbar.set_postfix({"avg_loss": f"{loss_per_trial.mean().item():.3e}"})
+            pbar.update(1)
+
+    # Post-training: evaluate fidelity and save outputs per trial
+    cfg_base = TrainConfig(
+        Omega_max=Omega,
+        Delta_0=Delta_0,
+        robustness_window=robustness_window,
+        K=K,
+        device="cpu",
     )
+    data_dir       = os.path.join(out_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    delta_vals_cpu = delta_vals.cpu()
+    tau_us         = math.pi / (2.0 * Delta_0)
 
-    os.makedirs(cfg.out_dir, exist_ok=True)
+    results = []
+    for b in range(B):
+        phi     = best_phi[b]                      # (K+1,) on CPU
+        alpha_b = alpha_vals_batch[b].cpu()        # (N,) in radians
+        tag     = f"Omega_max{Omega_max}_K{K}_trial{b + 1}"
 
-    delta_list = [-100.0, -32.0, 32.0, 100.0]  # MHz
-    alpha_list = (2 * torch.rand(4)).tolist()  # Random alpha values
+        pd.DataFrame({
+            "delta (MHz)": delta_list_mhz,
+            "alpha (pi rad)": (alpha_b / math.pi).tolist(),
+        }).to_csv(os.path.join(data_dir, f"{tag}_input.csv"), index=False)
 
-    delta_vals = torch.tensor(delta_list) * 2 * math.pi
-    alpha_vals = torch.tensor(alpha_list) * math.pi
-
-    config_tag = f"Omega_max{Omega_max}_K{K}_trial{trial + 1}"
-
-    input_df = pd.DataFrame(
-        {
-            "delta (MHz)": delta_list,
-            "alpha (pi rad)": alpha_list
-        }
-    )
-    input_df.to_csv(os.path.join(cfg.out_dir, f"{config_tag}_input.csv"), index=False)
-
-    phi_final, final_loss, gate_fidelity = train(
-        cfg,
-        delta_vals,
-        alpha_vals,
-        sample_size=2048,
-        progress_cb=None,
-        verbose=False,
-        plot_name=os.path.join(cfg.out_dir, f"{config_tag}_matrix_element.png")
-    )
-
-    tau_us = math.pi / (2.0 * cfg.Delta_0)
-    omega_2pi_mhz = float(Omega_max)
-    delta_2pi_mhz = float(Delta_0_mhz)
-    t_rows = []
-    hx_rows = []
-    hz_rows = []
-    for i, phi in enumerate(phi_final.tolist()):
-        t_rows.append(np.abs(phi) / cfg.Omega_max)
-        hx_rows.append(omega_2pi_mhz * np.sign(phi))
-        hz_rows.append(0.0)
-        if i != len(phi_final) - 1:
-            t_rows.append(tau_us)
-            hx_rows.append(0.0)
-            hz_rows.append(delta_2pi_mhz)
-
-    pulse_df = pd.DataFrame(
-        {
+        t_rows, hx_rows, hz_rows = [], [], []
+        for i, pv in enumerate(phi.tolist()):
+            t_rows.append(abs(pv) / Omega)
+            hx_rows.append(Omega_max * math.copysign(1.0, pv))
+            hz_rows.append(0.0)
+            if i != K:
+                t_rows.append(tau_us)
+                hx_rows.append(0.0)
+                hz_rows.append(Delta_0_mhz)
+        pd.DataFrame({
             "t (us)": t_rows,
             "H_x (2pi MHz)": hx_rows,
             "H_z (2pi MHz)": hz_rows,
-        }
-    )
-    pulse_df.to_csv(os.path.join(cfg.out_dir, f"{config_tag}.csv"), index=False)
-    runtime = get_control_runtime(phi_final, cfg)
+        }).to_csv(os.path.join(data_dir, f"{tag}.csv"), index=False)
 
-    return {
-        "Omega_max (MHz)": Omega_max,
-        "K": K,
-        "trial": trial + 1,
-        "Runtime (us)": runtime,
-        "Gate Fidelity": gate_fidelity,
-    }
+        fid     = fidelity(phi, delta_vals_cpu, alpha_b, cfg_base)
+        runtime = get_control_runtime(phi, cfg_base)
+        results.append({
+            "Omega_max (MHz)": Omega_max,
+            "K":               K,
+            "trial":           b + 1,
+            "Runtime (us)":    runtime,
+            "Gate Fidelity":   fid,
+        })
+
+    return results
 
 
 
@@ -267,10 +323,8 @@ def main():
                            help="δ samples per α config per NN step.")
     argparser.add_argument("--num_trials", type=int, default=30,
                            help="Classical trials per (Omega, K) combination.")
-    argparser.add_argument("--max_workers", type=int, default=6,
-                           help="Parallel workers for classical trials.")
     argparser.add_argument("--device", type=str, default="cpu",
-                           help="Device for NN training (e.g. 'cpu' or 'cuda').")
+                           help="Device for training (e.g. 'cpu' or 'cuda').")
     args = argparser.parse_args()
 
     out_dir = "/content/drive/MyDrive/Colab Notebooks/Scaling Law/" if args.is_drive else args.out_dir
@@ -304,52 +358,26 @@ def main():
             "Gate Fidelity":   [],
         }
 
-        tasks = [
-            (Omega_max, K, trial, out_dir)
-            for Omega_max, K in itertools.product(Omega_max_list, K_list)
-            for trial in range(num_trials)
-        ]
-        random.shuffle(tasks)
-
-        max_workers = min(args.max_workers, len(tasks))
-        print(f"\n=== Classical QSP scaling law ===")
+        grid = list(itertools.product(Omega_max_list, K_list))
+        print(f"\n=== Classical QSP scaling law (GPU-batched) ===")
         print(f"  Grid : Omega={Omega_max_list} MHz  K={K_list}")
-        print(f"  Trials/config: {num_trials}  |  Total tasks: {len(tasks)}")
-        print(f"  Workers: {max_workers}\n")
+        print(f"  Trials/config: {num_trials}  |  Configs: {len(grid)}  |  Device: {args.device}\n")
 
-        def _fmt_hms(seconds: float) -> str:
-            h, rem = divmod(max(0.0, seconds), 3600)
-            m, s   = divmod(rem, 60)
-            return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
-
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-            futures   = [executor.submit(_run_single_trial, t) for t in tasks]
-            pbar      = tqdm(total=len(futures), desc="Classical trials", dynamic_ncols=True)
-            start_t   = time.time()
-            completed = 0
-
-            for fut in as_completed(futures):
-                result     = fut.result()
-                completed += 1
-                elapsed    = time.time() - start_t
-                rate       = completed / elapsed if elapsed > 0 else 0.0
-                remaining  = (len(futures) - completed) / rate if rate > 0 else float("inf")
-                end_time   = datetime.now() + timedelta(seconds=remaining if remaining != float("inf") else 0)
-
-                pbar.update(1)
-                pbar.set_postfix_str(
-                    f"ETA {_fmt_hms(remaining)} | ends {end_time:%H:%M:%S}"
-                    if remaining != float("inf") else "ETA --:--:--"
-                )
-
-                fidelity_data["Omega_max (MHz)"].append(result["Omega_max (MHz)"])
-                fidelity_data["K"].append(result["K"])
-                fidelity_data["Runtime (us)"].append(result["Runtime (us)"])
-                fidelity_data["trial"].append(result["trial"])
-                fidelity_data["Gate Fidelity"].append(result["Gate Fidelity"])
-
-            pbar.close()
+        for i, (Omega_max, K) in enumerate(grid, 1):
+            print(f"[{i}/{len(grid)}] Omega={Omega_max} MHz  K={K}  ({num_trials} trials in parallel)")
+            batch_results = _run_classical_batch(
+                Omega_max=Omega_max,
+                K=K,
+                num_trials=num_trials,
+                out_dir=out_dir,
+                device=args.device,
+            )
+            for r in batch_results:
+                fidelity_data["Omega_max (MHz)"].append(r["Omega_max (MHz)"])
+                fidelity_data["K"].append(r["K"])
+                fidelity_data["Runtime (us)"].append(r["Runtime (us)"])
+                fidelity_data["trial"].append(r["trial"])
+                fidelity_data["Gate Fidelity"].append(r["Gate Fidelity"])
 
         fidelity_df = pd.DataFrame(fidelity_data)
         out_csv = os.path.join(out_dir, "scaling_law_classical.csv")
