@@ -1,140 +1,212 @@
-# Detuning-Selective Unitary Control via QSP + Neural Network + PCA
+# Unitary Control by Detuning (QSP)
 
-A compact pipeline for designing detuning-selective single-qubit gates via
-**Quantum Signal Processing (QSP)**.  A neural network maps four target
-rotation angles `(α₀, α₁, α₂, α₃)` to a QSP phase vector `φ ∈ ℝ^{K+1}`, so
-that the resulting pulse implements `R_x(αᵢ)` for detunings near the `i`-th
-target centre, and PCA compresses the learned `φ(α)` trajectory into a small
-number of analytically expressible components.
+Gradient-based Quantum Signal Processing (QSP) for implementing target
+single-qubit X-rotations using detuning as the control parameter.
+Given a list of detuning peaks δᵢ and target angles αᵢ, the framework learns
+a phase sequence φ ∈ ℝ^{K+1} such that
 
-## System
+> `build_qsp_unitary(φ, δ) ≈ Rₓ(αᵢ)`  for all  `δ ∈ [δᵢ − σ, δᵢ + σ]`
 
-| Parameter | Value |
-|-----------|-------|
-| Detuning centres | Δ ∈ {−100, −32, +32, +100} MHz |
-| Max detuning Δ₀ | 200 MHz |
-| Rabi frequency Ω | ∈ {20, 40, 80} MHz |
-| Robustness window | ±10 MHz |
-| QSP degree K | ∈ {50, 70, 100, 160} |
+Two complementary approaches are provided:
 
-## Problem
+| Approach | File / Package | Description |
+|----------|---------------|-------------|
+| **Classical (per-instance)** | `single_pulse_optimization_QSP/` | Adam-based optimisation of φ for a fixed (δᵢ, αᵢ) set |
+| **Neural network (amortised)** | `neural_network_optimization_QSP/` | MLP trained once over random α configs; predicts φ instantly at inference |
 
-Given `Ω`, `K`, and a target vector `(α₀..α₃)`, produce `φ = (φ₀..φ_K)` such that
-the physical-basis sequence
+---
+
+## Repository structure
 
 ```
-R_x(φ₀; δ) · R_z(θ) · R_x(φ₁; δ) · R_z(θ) · … · R_x(φ_K; δ)  =  R_x(αᵢ)
+.
+├── single_pulse_optimization_QSP/
+│   ├── qsp_fit_x_rotation.py   # core QSP physics + classical trainer
+│   └── __init__.py
+│
+├── neural_network_optimization_QSP/
+│   ├── qsp_phase_net.py        # QSPPhaseNet model + NNTrainConfig + train_nn
+│   └── __init__.py
+│
+├── streamlit_app.py            # interactive demo (both approaches)
+├── scaling_law.py              # grid sweep over Omega x K (classical + NN)
+├── util.py                     # fidelity helpers, Bloch animation, pulse plots
+└── requirements.txt
 ```
 
-holds whenever `|δ − δᵢ| < σ` for any of the four target peaks `i`.  Here
-`R_x(φ; δ) = exp(−i/2 · (sign(φ)·Ω·X + δ·Z) · |φ|)` is the driven control
-operator in the presence of detuning; `R_z(θ)` is the free-evolution signal
-operator with `θ = π/2 · (1 + δ/Δ₀)`.
+---
 
-## Architecture
-
-`PulseNet(Ω, K)` — an 8-layer MLP with 512 hidden units and SiLU activations.
-
-- **Input**: `(B, 4)` rotation angles.
-- **Encoding**: Fourier features `[cos(k·α/2), sin(k·α/2)]` for `k = 1..8`.  The
-  half-angle matches the 4π fundamental period of `R_x(α)` in SU(2).
-- **Output**: `(B, K+1)` QSP phases in float64.
-- **Training data**: 65 536 IID samples of `α ∈ [−ε, 4π+ε]^4` with `ε = 0.01`.
-- **Eval data**: 1024 held-out samples.
-- **Batch / optim**: 512, Adam + CosineAnnealingLR, 40 epochs, gradient
-  clipping 10.0, float64 throughout.
-- **Loss**: vectorized `|u₀₀(pred) − exp(−iα/2)|²` averaged over 128 detunings
-  per peak (robustness window), computed via `build_qsp_unitary_batched`.
-
-## Repository layout
-
-```
-neural_network_optimization/
-├── constants.py          # system constants, Ω / K grids
-├── physics.py            # signal / control operators, QSP unitary, fidelity
-├── model.py              # PulseNet, phi_to_pulse_df, get_runtime_from_phi
-├── data.py               # uniform α sampler + fixed 65 536 / 1024 dataset
-├── train.py              # training loop + CLI
-├── inference.py          # load_model, generate_pulse/phi, compute_fidelity, compute_runtime
-├── scaling_law.py        # grid over (Ω, K); writes CSVs + figures; triggers PCA
-├── pca_analysis.py       # per-peak PCA on PulseNet phi(α); Fourier / poly fits
-├── plotting.py           # matrix-element, scaling law, runtime-fidelity, PCA figures
-├── tests/                # pytest unit tests (23 cases)
-└── weights/              # joint_Omega{Ω}_K{K}.pt (12 files after full run)
-outputs/                  # scaling_law_*.csv, figures, pca/Omega{Ω}_K{K}/peak{i}/*
-streamlit_app.py          # demo: load-only, plus PCA tab
-```
-
-## Usage
-
-Install:
+## Installation
 
 ```bash
+git clone https://github.com/shiminki/unitary_control_by_delta.git
+cd unitary_control_by_delta
 pip install -r requirements.txt
 ```
 
-### Unit tests (fast)
+For Bloch-sphere animations (optional):
 
 ```bash
-pytest neural_network_optimization/tests/
+pip install qutip
 ```
 
-### Train a single (Ω, K)
+---
 
-```bash
-python -m neural_network_optimization.train --Omega 80 --K 70
-```
+## Key parameters
 
-Weights land in `neural_network_optimization/weights/joint_Omega80.0_K70.pt`.
+| Symbol | CLI name | Meaning |
+|--------|----------|---------|
+| K | `--K` | QSP order; phase vector φ has length K+1 |
+| Ω_max | `--Omega_max` | Maximum Rabi frequency (MHz) |
+| Δ₀ | `--Delta_0` | Maximum detuning range (MHz); δ ∈ [−Δ₀, Δ₀] |
+| σ | `--robustness_window` | Half-width of the robustness window (MHz) |
+| N | `--N` / `--num_peaks` | Number of detuning peaks / target gates |
+| δᵢ | `--delta_vals` | Peak detuning locations (MHz) |
+| αᵢ | alpha_vals input | Target rotation angles (units of π) |
 
-### Full scaling law (trains all 12 configs, writes summary + figures + PCA)
+All internal computations use **angular units** (rad/μs).  
+Convert: `value_rad = 2π × value_MHz`.
 
-```bash
-python -m neural_network_optimization.scaling_law
-```
+---
 
-Outputs (under `outputs/`):
-- `scaling_law_full.csv` (6 144 rows: one per trial).
-- `scaling_law_summary.csv` (12 rows: per-(Ω, K) avg + min + std fidelity + mean runtime).
-- `scaling_law.png` (avg + min fidelity vs K, one line per Ω).
-- `runtime_vs_fidelity.png` (runtime vs fidelity / infidelity scatter).
-- `matrix_element_Omega80_K70.png` (canonical matrix-element plot).
-- `pca/Omega80_K70/peak{i}/` (overview + amplitudes + comparative pulses + comparative
-  matrix elements PNGs, three coefficient CSVs, analytical-form text per peak).
-
-Pass `--small` for a tiny test grid (`Ω=40, K ∈ {20, 30}`, 8 trials each).
-
-### PCA for a single model
-
-```bash
-python -m neural_network_optimization.pca_analysis --Omega 80 --K 70
-```
-
-### Inference from Python
-
-```python
-from neural_network_optimization import load_model, generate_pulse, compute_fidelity
-
-model = load_model(Omega=80, K=70)
-pulse_df = generate_pulse(model, [math.pi/2, math.pi, math.pi/3, 0.0])
-fidelity = compute_fidelity(model, [math.pi/2, math.pi, math.pi/3, 0.0])
-```
-
-### Interactive demo
-
-Demo with single pulse GRAPE:
-
-```https://unitarycontrolbydelta-3vqnqcwxxnwdgwuuflhs4u.streamlit.app/```
-
-Demo with NN:
+## 1 · Streamlit demo
 
 ```bash
 streamlit run streamlit_app.py
 ```
 
-Sidebar dropdowns pick `(Ω, K)`; sliders pick the four `αᵢ`.  Tabs show the
-pulse schedule, the matrix-element vs detuning plot, the numerical fidelity
-and runtime, the `φ` bar plot, and the per-peak PCA decomposition with
-Fourier and polynomial fits.  The app never trains — if weights are missing
-it prints the command to generate them.
+The app has two sections:
 
+### Classical QSP optimisation
+Configure K, Ω_max, Δ₀, σ, δ-peaks, α-targets and click **Run Training**.
+Results tabs show the pulse schedule, matrix element vs δ, fidelity contour,
+fidelity-vs-std, and an optional Bloch-sphere animation.
+
+### Neural Network QSP
+Configure NN training steps, batch size, and optionally a `peak_index`
+(to train with only one α varying). Click **Train Neural Network**,
+then use the prediction panel to get an instant φ prediction and fidelity
+plot for any α configuration.
+
+---
+
+## 2 · Classical optimisation CLI
+
+```bash
+python -m single_pulse_optimization_QSP.qsp_fit_x_rotation \
+    --K 70 \
+    --num_peaks 4 \
+    --Omega_max 80 \
+    --Delta_0 200 \
+    --robustness_window 10 \
+    --steps 8000 \
+    --out_dir plots_relaxed
+```
+
+This trains a single φ for the default 4-peak configuration and saves a
+matrix-element plot and the learned phases to `--out_dir`.
+
+---
+
+## 3 · Neural network training CLI
+
+```bash
+python -m neural_network_optimization_QSP.qsp_phase_net \
+    --K 70 --N 4 \
+    --Omega_max 80 --Delta_0 200 --robustness_window 10 \
+    --delta_vals -100 -32 32 100 \
+    --steps 10000 --batch_size 64 --lr 1e-3 \
+    --out_dir nn_qsp_output
+```
+
+**Single-peak mode** — train with only α at peak index 0 varying:
+
+```bash
+python -m neural_network_optimization_QSP.qsp_phase_net \
+    --K 70 --N 4 --peak_index 0 \
+    --delta_vals -100 -32 32 100 \
+    --steps 10000 --out_dir nn_qsp_peak0
+```
+
+**Programmatic usage:**
+
+```python
+import math, torch
+from neural_network_optimization_QSP import NNTrainConfig, train_nn, predict_phi
+
+cfg = NNTrainConfig(
+    K=70, N=4,
+    Omega_max=2*math.pi*80,
+    Delta_0=2*math.pi*200,
+    robustness_window=2*math.pi*10,
+    delta_vals=[2*math.pi*d for d in [-100, -32, 32, 100]],
+    steps=10_000,
+    batch_size=64,
+    peak_index=None,   # None = all peaks vary; int i = only peak i varies
+)
+model, train_losses, eval_records = train_nn(cfg)
+
+alpha_query = torch.tensor([0.5*math.pi, math.pi, 0.3*math.pi, 1.5*math.pi])
+phi = predict_phi(model, alpha_query)   # shape (K+1,) — instant, no optimisation
+```
+
+Outputs saved to `--out_dir`:
+- `model_final.pt` — best checkpoint (by held-out eval loss)
+- `training_curve.png` — train + eval loss vs step
+- `ckpt_step*.pt` — intermediate checkpoints
+
+---
+
+## 4 · Scaling law sweep
+
+Sweeps the grid **Ω_max ∈ {40, 80, 120, 160} MHz × K ∈ {50, 70, 100}**.
+
+```bash
+# Both classical (30 trials/config) and NN (one model/config)
+python scaling_law.py --out_dir scaling_law_results
+
+# NN only
+python scaling_law.py --skip_classical true --out_dir scaling_law_results
+
+# Classical only
+python scaling_law.py --skip_nn true --out_dir scaling_law_results
+
+# Quick smoke-test (small grid, 2 trials, 200 NN steps)
+python scaling_law.py --small true --skip_classical true
+```
+
+Key flags:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--nn_steps` | 5000 | Training steps per NN model |
+| `--nn_batch_size` | 64 | Batch size for NN training |
+| `--num_trials` | 30 | Classical trials per (Ω, K) config |
+| `--max_workers` | 6 | Parallel workers for classical trials |
+| `--skip_classical` | false | Skip classical sweep |
+| `--skip_nn` | false | Skip NN sweep |
+| `--small` | false | Reduced grid for quick testing |
+
+Outputs:
+- `scaling_law_results/scaling_law_classical.csv` — per-trial fidelity & runtime
+- `scaling_law_results/scaling_law_nn.csv` — per-(Ω, K) NN eval loss & avg fidelity
+- `scaling_law_results/nn_data/Omega{X}_K{Y}/` — per-model checkpoints, training curves, per-config fidelity CSV
+
+---
+
+## Physics background
+
+The QSP sequence alternates **control pulses** and **signal operators**:
+
+```
+U = R_z(φ_0; δ) · W(θ) · R_z(φ_1; δ) · W(θ) · … · R_z(φ_K; δ)
+```
+
+- **Signal operator** `W(θ) = Rₓ(θ)` with `θ = π/2 · (1 + δ/Δ₀)`,
+  realised by waiting `τ = π/(2Δ₀)` with Ω = 0.
+- **Control operator** `R_z(φ; δ)` — drive at Rabi frequency Ω_max for time
+  `|φ|/Ω_max`, with detuning δ leaking in as an off-axis tilt.
+
+In the physical (lab) basis the sequence implements `Rₓ(αᵢ)` near δ = δᵢ.
+The **neural network** encodes each target gate as `[cos(αᵢ/2), sin(αᵢ/2)]`
+and learns the mapping to φ across all α configurations in a single training run.

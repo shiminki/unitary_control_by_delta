@@ -1,8 +1,11 @@
+phase_cache
+scaling_law_results
+scaling_law_small
+plots_relaxed
+nn_qsp_output
 __pycache__
 .DS_Store
 .pytest_cache
 .claude
-
-# Generated artifacts — always reproducible from source.
 neural_network_optimization/weights/
 outputs/
