@@ -22,6 +22,8 @@ import os
 import sys
 
 import matplotlib
+
+from neural_network_optimization_QSP.qsp_phase_net import QSPPhaseNet
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -68,7 +70,7 @@ from neural_network_optimization_QSP import (
 
 CACHE_DIR   = "phase_cache"        # single-pulse phase cache (shared with streamlit)
 FIGURES_DIR = "figures"
-NN_DIR      = "figures_nn_cache"   # NN model + result cache for scaling law
+NN_DIR      = "scaling_law_output/nn_data"   # NN model + result cache for scaling law
 
 os.makedirs(FIGURES_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR,   exist_ok=True)
@@ -229,7 +231,11 @@ def run_nn_scaling(Omega_max_mhz, K):
         checkpoint_interval=NN_STEPS,
         eval_configs=128,
     )
-    model, _, eval_records = train_nn(cfg_nn, verbose=True)
+    if os.path.exists(os.path.join(run_dir, "model_final.pt")):
+        model = QSPPhaseNet(N=N, K=K).to("cpu").double()
+        model.load_state_dict(torch.load(os.path.join(run_dir, "model_final.pt"), map_location="cpu"))
+    else:
+        model, _, eval_records = train_nn(cfg_nn, verbose=True)
 
     cfg_qsp = TrainConfig(
         Omega_max=cfg_nn.Omega_max,
@@ -375,6 +381,40 @@ _K_COLORS     = {50: "C0", 70: "C1", 100: "C2"}
 _MARKERS      = ["o", "s", "^", "D"]
 
 
+def _fit_power_law_2d(df, y_col):
+    """Fit y ~ C * Omega^n1 * K^n2 via OLS in log-log space. Returns (C, n1, n2, r2)."""
+    mask = df[y_col] > 0
+    sub  = df[mask]
+    log_y     = np.log(sub[y_col].values)
+    log_Omega = np.log(sub["Omega_max_mhz"].values)
+    log_K     = np.log(sub["K"].values)
+    X = np.column_stack([np.ones(len(sub)), log_Omega, log_K])
+    coeffs, _, _, _ = np.linalg.lstsq(X, log_y, rcond=None)
+    log_C, n1, n2 = coeffs
+    y_pred = X @ coeffs
+    ss_res = np.sum((log_y - y_pred) ** 2)
+    ss_tot = np.sum((log_y - log_y.mean()) ** 2)
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    return float(np.exp(log_C)), float(n1), float(n2), float(r2)
+
+
+def _fit_power_law_1d(x_vals, y_vals):
+    """Fit y ~ C * x^n via OLS in log space. Returns (C, n, r2)."""
+    x = np.asarray(x_vals, dtype=float)
+    y = np.asarray(y_vals, dtype=float)
+    mask = (y > 0) & (x > 0)
+    lx, ly = np.log(x[mask]), np.log(y[mask])
+    if len(lx) < 2:
+        return float("nan"), float("nan"), float("nan")
+    X = np.column_stack([np.ones(len(lx)), lx])
+    coeffs, _, _, _ = np.linalg.lstsq(X, ly, rcond=None)
+    log_C, n = coeffs
+    ss_res = np.sum((ly - X @ coeffs) ** 2)
+    ss_tot = np.sum((ly - ly.mean()) ** 2)
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    return float(np.exp(log_C)), float(n), float(r2)
+
+
 def figure2():
     print("\n=== Figure 2: scaling law ===", flush=True)
 
@@ -383,21 +423,69 @@ def figure2():
         rows.append(run_nn_scaling(Omega, K))
     df = pd.DataFrame(rows)
 
+    # ── scaling-law fits ──────────────────────────────────────────────────────
+    lines = ["Figure 2 — Scaling Law Fits", "=" * 60, ""]
+
+    for y_col, label in [("avg_infidelity", "Infidelity (1-F)"),
+                          ("avg_runtime",    "Runtime T (µs)")]:
+        C, n1, n2, r2 = _fit_power_law_2d(df, y_col)
+        lines.append(f"{label}")
+        lines.append(f"  2-D fit:  y ~ {C:.4e} * Omega^({n1:.4f}) * K^({n2:.4f})   R²={r2:.4f}")
+        lines.append("")
+
+        lines.append("  Varying Omega (fixed K):")
+        for K_val in SL_K:
+            sub = df[df["K"] == K_val].sort_values("Omega_max_mhz")
+            C1, n, r2_1 = _fit_power_law_1d(sub["Omega_max_mhz"], sub[y_col])
+            lines.append(f"    K={K_val:3d}:  y ~ {C1:.4e} * Omega^({n:.4f})   R²={r2_1:.4f}")
+
+        lines.append("  Varying K (fixed Omega):")
+        for Omega_val in SL_OMEGA:
+            sub = df[df["Omega_max_mhz"] == Omega_val].sort_values("K")
+            C1, n, r2_1 = _fit_power_law_1d(sub["K"], sub[y_col])
+            lines.append(f"    Omega={Omega_val:3d} MHz:  y ~ {C1:.4e} * K^({n:.4f})   R²={r2_1:.4f}")
+        lines.append("")
+
+    lines.append("Raw data")
+    lines.append("-" * 60)
+    lines.append(df[["Omega_max_mhz", "K", "avg_infidelity", "std_infidelity",
+                      "avg_runtime", "std_runtime"]].to_string(index=False))
+
+    stats_path = os.path.join(FIGURES_DIR, "figure2_scaling_law_stats.txt")
+    with open(stats_path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print(f"Scaling-law stats written to {stats_path}", flush=True)
+
     fig, axes = plt.subplots(2, 2, figsize=(13, 9),
                               gridspec_kw={"hspace": 0.35, "wspace": 0.30})
 
-    def _loglog_panel(ax, x_col, y_col, group_col, group_vals, colors,
+    def _loglog_panel(ax, x_col, y_col, std_col, group_col, group_vals, colors,
                       xlabel, ylabel, label_fmt, panel_letter):
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        all_x = []
         for i, gv in enumerate(group_vals):
-            sub = df[df[group_col] == gv].sort_values(x_col)
-            y   = sub[y_col].values
-            x   = sub[x_col].values
+            sub  = df[df[group_col] == gv].sort_values(x_col)
+            y    = sub[y_col].values
+            x    = sub[x_col].values
+            std  = sub[std_col].values
             mask = y > 0
-            ax.loglog(x[mask], y[mask],
-                      marker=_MARKERS[i % len(_MARKERS)],
-                      color=colors[gv],
-                      label=label_fmt(gv),
-                      markersize=7)
+            all_x.extend(x[mask].tolist())
+            # clip lower error bar so it never crosses zero on log scale
+            yerr_lo = np.minimum(std[mask], y[mask] * 0.999)
+            ax.errorbar(x[mask], y[mask],
+                        yerr=[yerr_lo, std[mask]],
+                        marker=_MARKERS[i % len(_MARKERS)],
+                        color=colors[gv],
+                        label=label_fmt(gv),
+                        markersize=7,
+                        capsize=4,
+                        elinewidth=1.2,
+                        capthick=1.2)
+        # tight x limits with ~20 % log-space padding on each side
+        x_min, x_max = min(all_x), max(all_x)
+        pad = (x_max / x_min) ** 0.2
+        ax.set_xlim(x_min / pad, x_max * pad)
         ax.set_xlabel(xlabel, labelpad=4)
         ax.set_ylabel(ylabel, labelpad=4)
         ax.legend(fontsize=FS - 2, loc="best")
@@ -410,7 +498,7 @@ def figure2():
     # (a) infidelity vs Ω, grouped by K
     _loglog_panel(
         axes[0, 0],
-        x_col="Omega_max_mhz", y_col="avg_infidelity",
+        x_col="Omega_max_mhz", y_col="avg_infidelity", std_col="std_infidelity",
         group_col="K", group_vals=SL_K, colors=_K_COLORS,
         xlabel=r"$\Omega_{\mathrm{max}}$ (MHz)",
         ylabel=r"Infidelity $1-F$",
@@ -420,17 +508,17 @@ def figure2():
     # (b) infidelity vs K, grouped by Ω
     _loglog_panel(
         axes[0, 1],
-        x_col="K", y_col="avg_infidelity",
+        x_col="K", y_col="avg_infidelity", std_col="std_infidelity",
         group_col="Omega_max_mhz", group_vals=SL_OMEGA, colors=_OMEGA_COLORS,
         xlabel=r"$K$",
-        ylabel=r"Infidelity $1-F$",
+        ylabel=r"",
         label_fmt=lambda v: rf"$\Omega_{{\mathrm{{max}}}}={int(v)}$ MHz",
         panel_letter="(b)",
     )
     # (c) runtime vs Ω, grouped by K
     _loglog_panel(
         axes[1, 0],
-        x_col="Omega_max_mhz", y_col="avg_runtime",
+        x_col="Omega_max_mhz", y_col="avg_runtime", std_col="std_runtime",
         group_col="K", group_vals=SL_K, colors=_K_COLORS,
         xlabel=r"$\Omega_{\mathrm{max}}$ (MHz)",
         ylabel=r"Runtime $T$ ($\mu$s)",
@@ -440,10 +528,10 @@ def figure2():
     # (d) runtime vs K, grouped by Ω
     _loglog_panel(
         axes[1, 1],
-        x_col="K", y_col="avg_runtime",
+        x_col="K", y_col="avg_runtime", std_col="std_runtime",
         group_col="Omega_max_mhz", group_vals=SL_OMEGA, colors=_OMEGA_COLORS,
         xlabel=r"$K$",
-        ylabel=r"Runtime $T$ ($\mu$s)",
+        ylabel=r"",
         label_fmt=lambda v: rf"$\Omega_{{\mathrm{{max}}}}={int(v)}$ MHz",
         panel_letter="(d)",
     )

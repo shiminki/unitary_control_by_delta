@@ -9,3 +9,5 @@ __pycache__
 .claude
 neural_network_optimization/weights/
 outputs/
+scaling_law_output/
+scaling_law_output/nn_data_no_grad_loss
