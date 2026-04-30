@@ -325,6 +325,8 @@ def main():
                            help="Classical trials per (Omega, K) combination.")
     argparser.add_argument("--device", type=str, default="cpu",
                            help="Device for training (e.g. 'cpu' or 'cuda').")
+    argparser.add_argument("--classical_steps", type=int, default=2000,
+                           help="Gradient steps for classical per-instance optimization.")
     args = argparser.parse_args()
 
     out_dir = "/content/drive/MyDrive/Colab Notebooks/Scaling Law/" if args.is_drive else args.out_dir
@@ -371,6 +373,7 @@ def main():
                 num_trials=num_trials,
                 out_dir=out_dir,
                 device=args.device,
+                steps=args.classical_steps,
             )
             for r in batch_results:
                 fidelity_data["Omega_max (MHz)"].append(r["Omega_max (MHz)"])
