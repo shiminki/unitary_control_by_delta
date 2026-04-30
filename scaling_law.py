@@ -160,6 +160,7 @@ def _run_nn_scaling(task):
         eval_interval=max(100, nn_steps // 20),
         checkpoint_interval=nn_steps,         # single checkpoint at the end
         eval_configs=2048,
+        lambda_grad=0.3,                      # gradient regularization to encourage smoothness (can help generalization
     )
 
     model_path = os.path.join(run_dir, "model_final.pt")
