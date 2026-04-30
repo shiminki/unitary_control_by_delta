@@ -1,8 +1,0 @@
-{
-  "Omega_max_mhz": 40.0,
-  "K": 50,
-  "avg_infidelity": 0.14860548690530928,
-  "std_infidelity": 0.04059819536171023,
-  "avg_runtime": 0.2029207750386498,
-  "std_runtime": 0.0055057377591930835
-}
