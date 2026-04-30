@@ -189,14 +189,19 @@ def _run_nn_scaling(task):
     torch.manual_seed(42)
     test_alphas = torch.rand(N_test, N, dtype=torch.float64) * 2 * math.pi
 
-    fidelities = []
+    fidelities, runtimes = [], []
     for alpha_i in test_alphas:
         phi = predict_phi(model, alpha_i, device=device).detach().cpu()
         fid = fidelity(phi, delta_vals_t.cpu(), alpha_i.cpu(), cfg_qsp)
         fidelities.append(fid)
+        runtimes.append(get_control_runtime(phi, cfg_qsp))
 
     avg_fid = float(np.mean(fidelities))
     std_fid = float(np.std(fidelities))
+    avg_runtime = float(np.mean(runtimes))
+    std_runtime = float(np.std(runtimes))
+    pi_pulse_us = math.pi / cfg_qsp.Omega_max          # pi / Omega  (µs)
+    avg_runtime_per_pi_pulse = avg_runtime / pi_pulse_us
 
     # save per-config fidelity breakdown
     fid_df = pd.DataFrame({
@@ -205,22 +210,27 @@ def _run_nn_scaling(task):
         "alpha_2": test_alphas[:, 2].tolist(),
         "alpha_3": test_alphas[:, 3].tolist(),
         "gate_fidelity": fidelities,
+        "runtime_us":    runtimes,
     })
     fid_df.to_csv(os.path.join(run_dir, "test_fidelities.csv"), index=False)
 
     print(
         f"  NN Omega={Omega_max} MHz  K={K}: "
-        f"best_eval={best_eval:.4e}  avg_fidelity={avg_fid:.4f} ± {std_fid:.4f}"
+        f"best_eval={best_eval:.4e}  avg_fidelity={avg_fid:.4f} ± {std_fid:.4f}  "
+        f"avg_runtime={avg_runtime:.4f} µs  runtime/pi-pulse={avg_runtime_per_pi_pulse:.2f}"
     )
 
     return {
-        "Omega_max (MHz)":   Omega_max,
-        "K":                 K,
-        "nn_steps":          nn_steps,
-        "final_eval_loss":   final_eval,
-        "best_eval_loss":    best_eval,
-        "avg_gate_fidelity": avg_fid,
-        "std_gate_fidelity": std_fid,
+        "Omega_max (MHz)":          Omega_max,
+        "K":                        K,
+        "nn_steps":                 nn_steps,
+        "final_eval_loss":          final_eval,
+        "best_eval_loss":           best_eval,
+        "avg_gate_fidelity":        avg_fid,
+        "std_gate_fidelity":        std_fid,
+        "avg_runtime_us":           avg_runtime,
+        "std_runtime_us":           std_runtime,
+        "avg_runtime_per_pi_pulse": avg_runtime_per_pi_pulse,
     }
 
 
@@ -239,7 +249,7 @@ Our objective is to study how infidelity and runtime varies with respect to:
 
 def main():
     argparser = argparse.ArgumentParser(description="Run scaling law experiments.")
-    argparser.add_argument("--out_dir", type=str, default="scaling_law_results")
+    argparser.add_argument("--out_dir", type=str, default="scaling_law_output")
     argparser.add_argument("--is_drive", type=str_to_bool, default=False,
                            help="Save to Google Drive path (Colab).")
     argparser.add_argument("--small", type=str_to_bool, default=False,

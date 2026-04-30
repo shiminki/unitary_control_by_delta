@@ -267,7 +267,7 @@ def batch_qsp_loss(
     alpha_t:     torch.Tensor,   # (B, S)
     Delta_0:     float,
     Omega_max:   float,
-    lambda_grad: float = 0.0,
+    lambda_grad: float = 0.3,
 ) -> torch.Tensor:
     """
     Vectorized QSP loss over a batch of independently predicted phase vectors.

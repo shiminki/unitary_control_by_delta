@@ -3,16 +3,16 @@ Figure 1 stats — single-pulse QSP optimization
 
 Subplot (a)  $[R_x(\pi),\,I,\,I,\,I]$:
   Total gate time  T = 0.136479 µs
-  Gate fidelity    F = 0.971496
+  Gate fidelity    F = 0.971369
 
 Subplot (b)  $[I,\,R_x(\pi),\,I,\,I]$:
   Total gate time  T = 0.145345 µs
-  Gate fidelity    F = 0.988788
+  Gate fidelity    F = 0.989052
 
 Subplot (c)  $[I,\,I,\,R_x(\pi),\,I]$:
   Total gate time  T = 0.141624 µs
-  Gate fidelity    F = 0.960553
+  Gate fidelity    F = 0.960480
 
 Subplot (d)  $[I,\,I,\,I,\,R_x(\pi)]$:
   Total gate time  T = 0.151287 µs
-  Gate fidelity    F = 0.989238
+  Gate fidelity    F = 0.989198
