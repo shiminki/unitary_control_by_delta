@@ -276,7 +276,7 @@ def main():
     out_dir = "/content/drive/MyDrive/Colab Notebooks/Scaling Law/" if args.is_drive else args.out_dir
 
     Omega_max_list = [160, 40, 80, 120]   # MHz
-    K_list         = [50, 70, 100]
+    K_list         = [100, 50, 70]
     num_trials     = args.num_trials
     nn_steps       = args.nn_steps
     nn_batch_size  = args.nn_batch_size

@@ -275,17 +275,24 @@ def batch_qsp_loss(
     Uses build_qsp_unitary_batched to process all B items in a single GPU pass
     (shape: B×S simultaneous 2×2 matmuls) instead of a Python for-loop.
     """
-    U    = build_qsp_unitary_batched(phi_batch, delta_s, Delta_0, Omega_max)  # (B, S, 2, 2)
-    pred = U[:, :, 0, 0]                                                       # (B, S) complex
+    if lambda_grad > 0.0:
+        # Track delta so we can differentiate pred w.r.t. it analytically,
+        # avoiding two extra forward passes that finite differences would require.
+        delta_in = delta_s.detach().requires_grad_(True)
+    else:
+        delta_in = delta_s
+
+    U    = build_qsp_unitary_batched(phi_batch, delta_in, Delta_0, Omega_max)  # (B, S, 2, 2)
+    pred = U[:, :, 0, 0]                                                        # (B, S) complex
     tgt  = (torch.cos(alpha_t / 2) - 1j * torch.sin(alpha_t / 2)).to(torch.complex128)
-    err  = (pred - tgt).abs() ** 2                                             # (B, S) real
+    err  = (pred - tgt).abs() ** 2                                              # (B, S) real
 
     if lambda_grad > 0.0:
-        eps    = 1e-2
-        U_p    = build_qsp_unitary_batched(phi_batch, delta_s + eps, Delta_0, Omega_max)
-        U_m    = build_qsp_unitary_batched(phi_batch, delta_s - eps, Delta_0, Omega_max)
-        d_pred = (U_p[:, :, 0, 0] - U_m[:, :, 0, 0]) / (2.0 * eps)
-        err    = err + lambda_grad * d_pred.abs() ** 2
+        # create_graph=True keeps the second-order graph so d(penalty)/d(phi)
+        # flows back through the network during loss.backward().
+        dp_real = torch.autograd.grad(pred.real.sum(), delta_in, create_graph=True)[0]
+        dp_imag = torch.autograd.grad(pred.imag.sum(), delta_in, create_graph=True)[0]
+        err = err + lambda_grad * (dp_real ** 2 + dp_imag ** 2)
 
     return err.mean()
 
@@ -384,6 +391,7 @@ def train_nn(
         )
         return batch_qsp_loss(
             phi_batch, delta_s, alpha_t, cfg.Delta_0, cfg.Omega_max,
+            lambda_grad=0.0,
         ).item()
 
     # ── main loop ─────────────────────────────────────────────────────────────
